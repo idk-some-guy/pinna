@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "CaConfig.h"
 #include "CaResampler.h"
 
 namespace ca {
@@ -15,6 +16,8 @@ struct VoiceSnap
 	float gainL, gainR, send;
 	uint8_t loop, playing;
 	int8_t poolSlot;
+	float sendHF;
+	uint32_t baseRate;
 };
 
 struct VoiceState
@@ -23,16 +26,17 @@ struct VoiceState
 	bool active;
 	bool wrapped;
 	double pos;
-	double step, stepTarget, stepInc;
-	uint32_t stepLeft;
+	double step;
 	float gainL, gainR, send;
 	float targetL, targetR, targetSend;
 	float incL, incR, incSend;
 	uint32_t gainLeft;
+	float fade[3][kOalFadeFrames];
+	uint32_t fadeLeft;
 };
 
-uint32_t RampFrames(float outRate);
 void StartVoice(VoiceState &st, const VoiceSnap &sn);
+void StopVoice(VoiceState &st, const VoiceSnap &sn);
 bool RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, float *accR, float *accSend, uint32_t frames);
 
 }

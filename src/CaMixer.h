@@ -20,7 +20,6 @@ struct Snapshot
 	uint32_t serial;
 	VoiceSnap voice[kChannels];
 	StreamSnap stream[kStreams];
-	float reverbLevel;
 };
 
 struct Shared
@@ -42,8 +41,11 @@ public:
 private:
 	Shared *mShared;
 	VoiceState mVoice[kChannels];
-	Biquad mShelf;
-	float mShelfLevel, mShelfRate;
+	VoiceSnap mLast[kChannels];
+	Biquad mShelf[kChannels];
+	float mShelfHF[kChannels];
+	float mShelfRate;
+	float mVoiceSend[kMaxBlock];
 };
 
 }

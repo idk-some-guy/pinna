@@ -1,4 +1,5 @@
 #include <math.h>
+#include <string.h>
 #include "CaVoice.h"
 
 namespace ca {
@@ -31,16 +32,23 @@ Fetch(const VoiceSnap &sn, const Loop &lp, bool wrapped, int64_t idx)
 			idx = lp.end - 1 - (lp.start - 1 - idx) % len;
 		else if(idx < 0)
 			return 0.0f;
-	}else if(idx < 0 || idx >= (int64_t)sn.length)
+	}else if(idx < 0)
 		return 0.0f;
+	else if(idx >= (int64_t)sn.length)
+		idx = sn.length - 1;
 	return sn.data[idx] * (1.0f / 32768.0f);
 }
 
-uint32_t
-RampFrames(float outRate)
+static double
+OalStep(const VoiceSnap &sn, float outRate)
 {
-	uint32_t n = (uint32_t)(outRate * 0.005f + 0.5f);
-	return n ? n : 1;
+	if(!(sn.freq >= 0.0f))
+		return 0.0;
+	float pitch = sn.baseRate ? sn.freq / (float)sn.baseRate * ((float)sn.baseRate / outRate) : sn.freq / outRate;
+	if(pitch > (float)kOalMaxPitch)
+		return kOalMaxPitch;
+	uint32_t fixed = (uint32_t)(pitch * (float)kOalStepOne);
+	return (double)(fixed ? fixed : 1) / kOalStepOne;
 }
 
 void
@@ -51,9 +59,6 @@ StartVoice(VoiceState &st, const VoiceSnap &sn)
 	st.wrapped = false;
 	st.pos = 0.0;
 	st.step = -1.0;
-	st.stepTarget = -1.0;
-	st.stepInc = 0.0;
-	st.stepLeft = 0;
 	st.gainL = st.targetL = sn.gainL;
 	st.gainR = st.targetR = sn.gainR;
 	st.send = st.targetSend = sn.send;
@@ -61,40 +66,87 @@ StartVoice(VoiceState &st, const VoiceSnap &sn)
 	st.gainLeft = 0;
 }
 
+void
+StopVoice(VoiceState &st, const VoiceSnap &sn)
+{
+	if(!st.active)
+		return;
+	st.active = false;
+	if(st.step <= 0.0)
+		return;
+	Loop lp = LoopOf(sn);
+	int64_t i = (int64_t)st.pos, heldAt = i;
+	float held = Fetch(sn, lp, st.wrapped, i);
+	for(int k = 1; k < kOalResamplerEdge; k++){
+		float v = Fetch(sn, lp, st.wrapped, i + k);
+		if(fabsf(v) < fabsf(held)){
+			held = v;
+			heldAt = i + k;
+		}
+	}
+	float next[3][kOalFadeFrames], w[kSincMaxTaps];
+	uint32_t at = kOalFadeFrames - st.fadeLeft;
+	double p = st.pos;
+	bool flat = false;
+	for(uint32_t k = 0; k < kOalFadeFrames; k++, p += st.step){
+		float r = held;
+		if(!flat){
+			int64_t j = (int64_t)p;
+			int first;
+			int taps = SincWeights(p - (double)j, st.step, w, &first);
+			if(j + first > heldAt)
+				flat = true;
+			else{
+				r = 0.0f;
+				for(int t = 0; t < taps; t++)
+					r += (j + first + t > heldAt ? held : Fetch(sn, lp, st.wrapped, j + first + t)) * w[t];
+			}
+		}
+		float g = (float)(kOalFadeFrames - k) / kOalFadeFrames;
+		bool old = k < st.fadeLeft;
+		next[0][k] = r * st.gainL * g + (old ? st.fade[0][at + k] : 0.0f);
+		next[1][k] = r * st.gainR * g + (old ? st.fade[1][at + k] : 0.0f);
+		next[2][k] = r * st.send * g + (old ? st.fade[2][at + k] : 0.0f);
+	}
+	memcpy(st.fade, next, sizeof(next));
+	st.fadeLeft = kOalFadeFrames;
+}
+
 bool
 RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, float *accR, float *accSend, uint32_t frames)
 {
-	if(!st.active)
+	if(st.active && !sn.playing)
+		StopVoice(st, sn);
+	if(!st.active && !st.fadeLeft)
 		return false;
-	uint32_t ramp = RampFrames(outRate);
-	double target = sn.freq > 0.0f ? sn.freq / outRate : 0.0;
-	if(st.step < 0.0){
-		st.step = st.stepTarget = target;
-	}else if(target != st.stepTarget){
-		st.stepTarget = target;
-		st.stepInc = (target - st.step) / ramp;
-		st.stepLeft = ramp;
-	}
-	float tl = sn.playing ? sn.gainL : 0.0f;
-	float tr = sn.playing ? sn.gainR : 0.0f;
-	float ts = sn.playing ? sn.send : 0.0f;
-	if(tl != st.targetL || tr != st.targetR || ts != st.targetSend){
-		st.targetL = tl;
-		st.targetR = tr;
-		st.targetSend = ts;
-		st.incL = (tl - st.gainL) / ramp;
-		st.incR = (tr - st.gainR) / ramp;
-		st.incSend = (ts - st.send) / ramp;
-		st.gainLeft = ramp;
+	if(st.active){
+		st.step = OalStep(sn, outRate);
+		if(sn.gainL != st.targetL || sn.gainR != st.targetR || sn.send != st.targetSend){
+			st.targetL = sn.gainL;
+			st.targetR = sn.gainR;
+			st.targetSend = sn.send;
+			st.incL = (sn.gainL - st.gainL) / kOalFadeFrames;
+			st.incR = (sn.gainR - st.gainR) / kOalFadeFrames;
+			st.incSend = (sn.send - st.send) / kOalFadeFrames;
+			st.gainLeft = kOalFadeFrames;
+		}
 	}
 	Loop lp = LoopOf(sn);
 	float w[kSincMaxTaps];
 	bool ended = false;
 	for(uint32_t n = 0; n < frames; n++){
-		if(!sn.playing && st.gainLeft == 0){
-			st.active = false;
-			break;
+		if(st.fadeLeft){
+			uint32_t k = kOalFadeFrames - st.fadeLeft--;
+			accL[n] += st.fade[0][k];
+			accR[n] += st.fade[1][k];
+			accSend[n] += st.fade[2][k];
 		}
+		if(!st.active){
+			if(!st.fadeLeft)
+				break;
+			continue;
+		}
+		float gl = st.gainL, gr = st.gainR, gs = st.send;
 		if(st.gainLeft){
 			if(--st.gainLeft){
 				st.gainL += st.incL;
@@ -106,8 +158,6 @@ RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, flo
 				st.send = st.targetSend;
 			}
 		}
-		if(st.stepLeft)
-			st.step = --st.stepLeft ? st.step + st.stepInc : st.stepTarget;
 		if(st.step == 0.0)
 			continue;
 		int64_t i = (int64_t)st.pos;
@@ -126,9 +176,9 @@ RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, flo
 			for(int k = 0; k < taps; k++)
 				s += Fetch(sn, lp, st.wrapped, i + first + k) * w[k];
 		}
-		accL[n] += s * st.gainL;
-		accR[n] += s * st.gainR;
-		accSend[n] += s * st.send;
+		accL[n] += s * gl;
+		accR[n] += s * gr;
+		accSend[n] += s * gs;
 		st.pos += st.step;
 		if(lp.on){
 			if(st.pos >= lp.end){
@@ -136,9 +186,8 @@ RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, flo
 				st.wrapped = true;
 			}
 		}else if(st.pos >= sn.length){
+			StopVoice(st, sn);
 			ended = true;
-			st.active = false;
-			break;
 		}
 	}
 	return ended;

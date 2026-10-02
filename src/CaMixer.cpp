@@ -11,10 +11,13 @@ Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0)
 	}
 }
 
-Mixer::Mixer(Shared *shared) : mShared(shared), mShelfLevel(-1.0f), mShelfRate(0.0f)
+Mixer::Mixer(Shared *shared) : mShared(shared), mShelfRate(0.0f)
 {
 	memset(mVoice, 0, sizeof(mVoice));
-	memset(&mShelf, 0, sizeof(mShelf));
+	memset(mLast, 0, sizeof(mLast));
+	memset(mShelf, 0, sizeof(mShelf));
+	for(int c = 0; c < kChannels; c++)
+		mShelfHF[c] = -1.0f;
 }
 
 void
@@ -31,25 +34,45 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		const VoiceSnap &sn = s.voice[c];
 		VoiceState &st = mVoice[c];
 		if(sn.playId != st.playId){
+			StopVoice(st, mLast[c]);
 			StartVoice(st, sn);
+			if(!st.fadeLeft)
+				mShelf[c].z1 = mShelf[c].z2 = 0.0f;
 			mShared->readerSlot[c].store(st.active ? sn.poolSlot : -1, std::memory_order_release);
 			if(!st.active)
 				mShared->finishedId[c].store(st.playId, std::memory_order_release);
 		}
-		if(!st.active)
+		mLast[c] = sn;
+		if(!sn.playing)
+			StopVoice(st, sn);
+		if(!st.active && !st.fadeLeft)
 			continue;
-		active++;
-		if(RenderVoice(st, sn, outRate, dryL, dryR, send, frames))
-			mShared->finishedId[c].store(st.playId, std::memory_order_release);
+		if(st.active)
+			active++;
+		Biquad &shelf = mShelf[c];
+		if(sn.sendHF != mShelfHF[c] || outRate != mShelfRate){
+			HighShelf(shelf, 5000.0f, outRate, sn.sendHF);
+			mShelfHF[c] = sn.sendHF;
+		}
+		for(uint32_t done = 0; done < frames && (st.active || st.fadeLeft);){
+			uint32_t n = frames - done < (uint32_t)kMaxBlock ? frames - done : (uint32_t)kMaxBlock;
+			bool sending = st.send != 0.0f || sn.send != 0.0f || st.fadeLeft != 0 || shelf.z1 != 0.0f || shelf.z2 != 0.0f;
+			if(sending)
+				memset(mVoiceSend, 0, n * sizeof(float));
+			bool ended = RenderVoice(st, sn, outRate, dryL + done, dryR + done, mVoiceSend, n);
+			if(sending){
+				RunBiquad(shelf, mVoiceSend, n);
+				for(uint32_t i = 0; i < n; i++)
+					send[done + i] += mVoiceSend[i];
+			}
+			if(ended)
+				mShared->finishedId[c].store(st.playId, std::memory_order_release);
+			done += n;
+		}
 		if(!st.active)
 			mShared->readerSlot[c].store(-1, std::memory_order_release);
 	}
-	if(s.reverbLevel != mShelfLevel || outRate != mShelfRate){
-		HighShelf(mShelf, 5000.0f, outRate, s.reverbLevel);
-		mShelfLevel = s.reverbLevel;
-		mShelfRate = outRate;
-	}
-	RunBiquad(mShelf, send, frames);
+	mShelfRate = outRate;
 	mShared->latchedSerial.store(s.serial, std::memory_order_release);
 	mShared->activeVoices.store(active, std::memory_order_relaxed);
 }

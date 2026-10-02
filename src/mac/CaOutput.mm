@@ -4,11 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "CaShell.h"
+#ifdef CA_SHELL_OFFLINE
+#include "CaShellOffline.h"
+#endif
 #include "CaRules.h"
 
 namespace ca {
-
-bool gShellOffline;
 
 static Shared *sShared;
 static Mixer *sMixer;
@@ -30,9 +31,11 @@ struct ReverbParam
 	AudioUnitParameterValue value;
 };
 
+static const float kOalLateTailTrimDb = -6.6f;
+
 static const ReverbParam kCaveOnReverb2[] = {
 	{ kReverb2Param_DryWetMix, 100.0f },
-	{ kReverb2Param_Gain, kCaveRoomMb / 100.0f },
+	{ kReverb2Param_Gain, kCaveRoomMb / 100.0f + kOalLateTailTrimDb },
 	{ kReverb2Param_MinDelayTime, kCaveReflectionsDelay },
 	{ kReverb2Param_MaxDelayTime, kCaveReflectionsDelay + kCaveLateDelay },
 	{ kReverb2Param_DecayTimeAt0Hz, kCaveDecayTime },
@@ -260,6 +263,10 @@ OpenOutput(AudioObjectID dev)
 bool
 ShellStart(Shared *shared, const char *)
 {
+#ifdef CA_SHELL_OFFLINE
+	if(gShellOffline)
+		return ShellStartOffline(shared, 48000.0);
+#endif
 	sShared = shared;
 	sMixer = new Mixer(shared);
 	sSampleTime = 0;
@@ -285,6 +292,9 @@ ShellStop(void)
 	sMixer = NULL;
 	sShared = NULL;
 }
+
+#ifdef CA_SHELL_OFFLINE
+bool gShellOffline;
 
 bool
 ShellStartOffline(Shared *shared, double rate)
@@ -320,6 +330,7 @@ ShellPassThroughTest(const float *inL, const float *inR, float *outL, float *out
 	sSampleTime += frames;
 	return ok;
 }
+#endif
 
 ShellInfo
 ShellGetInfo(void)

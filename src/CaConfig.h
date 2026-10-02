@@ -11,7 +11,11 @@ enum
 	kPoliceRadio = 43,
 	kStreams = 3,
 	kMaxBlock = 4096,
-	kPoolSlots = 96
+	kPoolSlots = 96,
+	kOalFadeFrames = 64,
+	kOalResamplerEdge = 24,
+	kOalMaxPitch = 10,
+	kOalStepOne = 65536
 };
 
 enum
