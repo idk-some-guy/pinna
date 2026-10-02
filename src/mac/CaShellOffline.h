@@ -2,6 +2,7 @@
 
 #include "CaShell.h"
 #include "CaDevice.h"
+#include "CaClock.h"
 
 #ifndef CA_SHELL_OFFLINE
 #error "CaShellOffline.h is for the offline tools only"
@@ -21,9 +22,11 @@ void ShellPostEventForTest(int event, uint32_t id);
 void ShellWaitControlForTest(void);
 bool ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames);
 uint64_t ShellFramesForTest(void);
-// Waits until each stream's posted generation has ended or is prefilled with what a render of frames needs.
+// Waits until each playing stream holds what a render of frames needs, has failed or has written its last chunk.
 bool ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs);
+bool ShellWaitPrefilledForTest(uint8_t stream, int timeoutMs, double *waitedMs);
 int ShellOwnerForTest(void);
+void ShellClockTimeForTest(ClockTime *time);
 Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
 
 }

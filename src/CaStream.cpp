@@ -383,7 +383,6 @@ StreamWorker::apply(const StreamCommand &c)
 		delete s.dec;
 		s.dec = 0;
 		s.done = true;
-		st.endedGen.store(c.gen, std::memory_order_release);
 		return;
 	}
 	if(c.op == CMD_OPEN){
@@ -450,8 +449,6 @@ StreamWorker::fill(int index)
 		}
 		c->frames = got;
 		ring.endWrite();
-		if(c->eof)
-			mStatus[index].endedGen.store(s.gen, std::memory_order_release);
 	}
 	if(!s.prefilled && (s.done || s.written >= s.rate)){
 		s.prefilled = true;

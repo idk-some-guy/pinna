@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <algorithm>
+#include <vector>
 #include "CaShell.h"
 #ifdef CA_SHELL_OFFLINE
 #include "CaShellOffline.h"
@@ -263,27 +265,51 @@ ProbeUserTrackMs(const char *path)
 	return ok ? (uint32_t)(seconds * 1000.0) : 0;
 }
 
+static void
+FileStamp(const char *path, uint64_t *size, int64_t *mtimeNs)
+{
+	struct stat st;
+	if(stat(path, &st) != 0){
+		*size = 0;
+		*mtimeNs = 0;
+		return;
+	}
+	*size = (uint64_t)st.st_size;
+	*mtimeNs = (int64_t)st.st_mtimespec.tv_sec * 1000000000 + st.st_mtimespec.tv_nsec;
+}
+
 uint32_t
 LoadStreamLengths(const char *cachePath, const char *const *paths, uint32_t count, uint32_t *lengths)
 {
+	std::vector<LengthEntry> entries(count);
 	FILE *f = fopen(cachePath, "rb");
-	bool cached = ReadLengthCache(f, lengths, count);
+	bool cached = ReadLengthCache(f, entries.data(), count);
 	if(f)
 		fclose(f);
-	if(cached)
-		return 0;
+	uint32_t probed = 0;
 	bool complete = true;
 	for(uint32_t i = 0; i < count; i++){
-		lengths[i] = ProbeLengthMs(paths[i]);
-		complete = complete && lengths[i] != 0;
+		LengthEntry &e = entries[i];
+		uint64_t size;
+		int64_t mtimeNs;
+		FileStamp(paths[i], &size, &mtimeNs);
+		if(!cached || !LengthEntryCurrent(e, size, mtimeNs)){
+			e.ms = ProbeLengthMs(paths[i]);
+			e.reserved = 0;
+			e.size = size;
+			e.mtimeNs = mtimeNs;
+			probed++;
+		}
+		lengths[i] = e.ms;
+		complete = complete && e.ms != 0;
 	}
-	if(!complete)
-		return count;
+	if(probed == 0 || !complete)
+		return probed;
 	f = fopen(cachePath, "wb");
-	WriteLengthCache(f, lengths, count);
+	WriteLengthCache(f, entries.data(), count);
 	if(f)
 		fclose(f);
-	return count;
+	return probed;
 }
 
 }

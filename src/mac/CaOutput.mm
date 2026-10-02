@@ -54,6 +54,7 @@ static AudioObjectPropertyListenerBlock sSystemListener, sDeviceListener;
 static id sWakeObserver;
 
 #ifdef CA_SHELL_OFFLINE
+static ClockTime *sClockTime;
 static bool sFake;
 static DeviceEntry sFakeList[kMaxDevices];
 static double sFakeRate[kMaxDevices];
@@ -719,7 +720,11 @@ ShellStart(Shared *shared, const char *deviceUid)
 	}
 	OutputFormat(kFallbackRate, 512, 0, "none");
 	sDrive.ToClock();
+#ifdef CA_SHELL_OFFLINE
+	sClock.Start(&sDrive, ClockRender, NULL, kFallbackRate, 512, sClockTime);
+#else
 	sClock.Start(&sDrive, ClockRender, NULL, kFallbackRate, 512);
+#endif
 	EnsureControl();
 	const char *pin = deviceUid && deviceUid[0] ? deviceUid : "default";
 	dispatch_sync(sControl, ^{
@@ -903,15 +908,16 @@ ShellFramesForTest(void)
 	return sDrive.Frames();
 }
 
+static uint32_t sLastChunkSeen[kStreams];
+
+// A render takes less than one settle's worth from the ring, so every last chunk is seen here before the reader takes it.
 static bool
-StreamSettled(ChunkRing &ring, const StreamStatus &st, uint32_t gen, uint32_t frames)
+StreamSettled(int s, ChunkRing &ring, const StreamStatus &st, const StreamSnap &snap, uint32_t gen, uint32_t frames)
 {
 	for(const Chunk *c = ring.peek(); c && GenBefore(c->gen, gen); c = ring.peek())
 		ring.pop();
-	if(st.endedGen.load(std::memory_order_acquire) == gen)
+	if(snap.gen != gen || !snap.playing || st.failedGen.load(std::memory_order_acquire) == gen || st.drainedGen.load(std::memory_order_acquire) == gen)
 		return true;
-	if(st.prefilledGen.load(std::memory_order_acquire) != gen)
-		return false;
 	uint32_t head = ring.head(), rate = 0;
 	uint64_t have = 0;
 	for(uint32_t i = ring.tail(); i != head; i++){
@@ -920,7 +926,13 @@ StreamSettled(ChunkRing &ring, const StreamStatus &st, uint32_t gen, uint32_t fr
 			continue;
 		rate = c->rate;
 		have += c->frames;
+		if(c->eof)
+			sLastChunkSeen[s] = gen;
 	}
+	if(sLastChunkSeen[s] == gen)
+		return true;
+	if(st.prefilledGen.load(std::memory_order_acquire) != gen)
+		return false;
 	double step = OalStreamStep(rate, (float)sRate);
 	return rate != 0 && have >= (uint64_t)(frames * step) + 2 * SincHalfFor(step) + kChunkFrames;
 }
@@ -932,9 +944,10 @@ ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs)
 	bool settled = false;
 	for(;;){
 		settled = true;
+		const Snapshot &snap = sShared->snapshot.read();
 		for(int s = 0; s < kStreams; s++){
 			uint32_t gen = sShared->status[s].postedGen.load(std::memory_order_acquire);
-			if(gen != 0 && !StreamSettled(sShared->ring[s], sShared->status[s], gen, frames))
+			if(gen != 0 && !StreamSettled(s, sShared->ring[s], sShared->status[s], snap.stream[s], gen, frames))
 				settled = false;
 		}
 		double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -946,10 +959,33 @@ ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs)
 	}
 }
 
+bool
+ShellWaitPrefilledForTest(uint8_t stream, int timeoutMs, double *waitedMs)
+{
+	auto t0 = std::chrono::steady_clock::now();
+	const StreamStatus &st = sShared->status[stream];
+	for(;;){
+		uint32_t gen = st.postedGen.load(std::memory_order_acquire);
+		bool done = st.prefilledGen.load(std::memory_order_acquire) == gen || st.failedGen.load(std::memory_order_acquire) == gen;
+		double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		if(waitedMs)
+			*waitedMs = ms;
+		if(done || ms >= timeoutMs)
+			return done;
+		std::this_thread::sleep_for(std::chrono::microseconds(100));
+	}
+}
+
 int
 ShellOwnerForTest(void)
 {
 	return sDrive.Owner();
+}
+
+void
+ShellClockTimeForTest(ClockTime *time)
+{
+	sClockTime = time;
 }
 #endif
 

@@ -7,7 +7,7 @@
 
 namespace ca {
 
-Clock::Clock(void) : mDrive(NULL), mRender(NULL), mCtx(NULL), mRate(kFallbackRate), mBlock(512), mRun(false), mStalls(0), mWakes(0) {}
+Clock::Clock(void) : mDrive(NULL), mRender(NULL), mCtx(NULL), mTime(NULL), mRate(kFallbackRate), mBlock(512), mRun(false), mStalls(0), mWakes(0) {}
 
 Clock::~Clock(void)
 {
@@ -15,12 +15,13 @@ Clock::~Clock(void)
 }
 
 void
-Clock::Start(Drive *drive, ClockRenderFn render, void *ctx, double rate, uint32_t block)
+Clock::Start(Drive *drive, ClockRenderFn render, void *ctx, double rate, uint32_t block, ClockTime *time)
 {
 	Stop();
 	mDrive = drive;
 	mRender = render;
 	mCtx = ctx;
+	mTime = time;
 	mStalls.store(0, std::memory_order_release);
 	SetFormat(rate, block);
 	mRun.store(true, std::memory_order_release);
@@ -42,15 +43,40 @@ Clock::SetFormat(double rate, uint32_t block)
 	mBlock.store(block > 0 ? block : 512, std::memory_order_release);
 }
 
+typedef std::chrono::steady_clock Steady;
+
+struct SteadyTime
+{
+	Steady::time_point Now(void) const { return Steady::now(); }
+	void SleepUntil(Steady::time_point t) const { std::this_thread::sleep_until(t); }
+};
+
+struct InjectedTime
+{
+	ClockTime *time;
+	Steady::time_point Now(void) const { return Steady::time_point(std::chrono::duration_cast<Steady::duration>(std::chrono::nanoseconds(time->Now()))); }
+	void SleepUntil(Steady::time_point t) const { time->SleepUntil(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count()); }
+};
+
 void
 Clock::Run(void)
 {
 #ifdef __APPLE__
 	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
-	typedef std::chrono::steady_clock Steady;
+	if(mTime){
+		InjectedTime t = { mTime };
+		Loop(t);
+	}else
+		Loop(SteadyTime());
+}
+
+template<class Time>
+void
+Clock::Loop(const Time &time)
+{
 	const Steady::duration stall = std::chrono::milliseconds(kStallMs), watch = std::chrono::milliseconds(kWatchMs);
-	Steady::time_point next = Steady::now(), lastCheck = next, quiet = next;
+	Steady::time_point next = time.Now(), lastCheck = next, quiet = next;
 	uint64_t lastBeat = mDrive->UnitBeats();
 	bool wasUnit = false;
 	while(mRun.load(std::memory_order_acquire)){
@@ -58,7 +84,7 @@ Clock::Run(void)
 		double rate = mRate.load(std::memory_order_acquire);
 		uint32_t block = mBlock.load(std::memory_order_acquire);
 		uint64_t beat = mDrive->UnitBeats();
-		Steady::time_point now = Steady::now();
+		Steady::time_point now = time.Now();
 		bool unit = mDrive->Owner() == Drive::OWNER_UNIT;
 		if(unit && wasUnit && beat == lastBeat){
 			if(now - quiet >= stall && mDrive->Stall())
@@ -74,15 +100,15 @@ Clock::Run(void)
 			mDrive->LeaveClock(block);
 		}
 		if(!rendered && mDrive->Owner() == Drive::OWNER_UNIT)
-			next = Steady::now() + watch;
+			next = time.Now() + watch;
 		else{
 			Steady::duration period = std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double>(block / rate));
 			next += period;
-			now = Steady::now();
+			now = time.Now();
 			if(now > next + kMaxLagTicks * period)
 				next = now;
 		}
-		std::this_thread::sleep_until(next);
+		time.SleepUntil(next);
 	}
 }
 

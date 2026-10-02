@@ -106,8 +106,8 @@ private:
 struct StreamStatus
 {
 	std::atomic<uint64_t> pos, format;
-	std::atomic<uint32_t> drainedGen, failedGen, prefilledGen, postedGen, endedGen;
-	StreamStatus(void) : pos(0), format(0), drainedGen(0), failedGen(0), prefilledGen(0), postedGen(0), endedGen(0) {}
+	std::atomic<uint32_t> drainedGen, failedGen, prefilledGen, postedGen;
+	StreamStatus(void) : pos(0), format(0), drainedGen(0), failedGen(0), prefilledGen(0), postedGen(0) {}
 	bool position(uint32_t gen, uint32_t *frame, uint32_t *rate) const
 	{
 		uint64_t p = pos.load(std::memory_order_acquire), f = format.load(std::memory_order_acquire);

@@ -67,27 +67,42 @@ MpegCappedLength(uint64_t length, uint64_t cap, uint32_t samplesPerFrame)
 	return cap < length && length - cap <= 2ull * samplesPerFrame ? cap : length;
 }
 
-// Bump when the MP3 decoder delay, the Info-tag cap or the WAV length rules change.
-static const uint32_t kLengthRulesVersion = 2;
+// Bump when the MP3 decoder delay, the Info-tag cap, the WAV length rules or the cache layout change.
+static const uint32_t kLengthRulesVersion = 3;
+
+struct LengthEntry
+{
+	uint32_t ms, reserved;
+	uint64_t size;
+	int64_t mtimeNs;
+};
+
+static_assert(sizeof(LengthEntry) == 24, "the cache stores 24 bytes per track");
 
 inline bool
-ReadLengthCache(FILE *f, uint32_t *lengths, uint32_t count)
+LengthEntryCurrent(const LengthEntry &e, uint64_t size, int64_t mtimeNs)
+{
+	return e.ms != 0 && e.size == size && e.mtimeNs == mtimeNs;
+}
+
+inline bool
+ReadLengthCache(FILE *f, LengthEntry *entries, uint32_t count)
 {
 	uint32_t header[3];
-	if(f == NULL || fseek(f, 0, SEEK_END) != 0 || ftell(f) != (long)sizeof(header) + (long)count * (long)sizeof(uint32_t))
+	if(f == NULL || fseek(f, 0, SEEK_END) != 0 || ftell(f) != (long)sizeof(header) + (long)count * (long)sizeof(LengthEntry))
 		return false;
 	rewind(f);
 	if(fread(header, sizeof(uint32_t), 3, f) != 3 || memcmp(header, "CALC", 4) != 0 || header[1] != kLengthRulesVersion || header[2] != count)
 		return false;
-	return fread(lengths, sizeof(uint32_t), count, f) == count;
+	return fread(entries, sizeof(LengthEntry), count, f) == count;
 }
 
 inline bool
-WriteLengthCache(FILE *f, const uint32_t *lengths, uint32_t count)
+WriteLengthCache(FILE *f, const LengthEntry *entries, uint32_t count)
 {
 	uint32_t header[3] = { 0, kLengthRulesVersion, count };
 	memcpy(header, "CALC", 4);
-	return f != NULL && fwrite(header, sizeof(uint32_t), 3, f) == 3 && fwrite(lengths, sizeof(uint32_t), count, f) == count;
+	return f != NULL && fwrite(header, sizeof(uint32_t), 3, f) == 3 && fwrite(entries, sizeof(LengthEntry), count, f) == count;
 }
 
 }
