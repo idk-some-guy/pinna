@@ -10,6 +10,8 @@
 #include <vector>
 #include "CaShell.h"
 #ifdef CA_SHELL_OFFLINE
+#include <chrono>
+#include <thread>
 #include "CaShellOffline.h"
 #endif
 #include "CaRules.h"
@@ -899,6 +901,49 @@ uint64_t
 ShellFramesForTest(void)
 {
 	return sDrive.Frames();
+}
+
+static bool
+StreamSettled(ChunkRing &ring, const StreamStatus &st, uint32_t gen, uint32_t frames)
+{
+	for(const Chunk *c = ring.peek(); c && GenBefore(c->gen, gen); c = ring.peek())
+		ring.pop();
+	if(st.endedGen.load(std::memory_order_acquire) == gen)
+		return true;
+	if(st.prefilledGen.load(std::memory_order_acquire) != gen)
+		return false;
+	uint32_t head = ring.head(), rate = 0;
+	uint64_t have = 0;
+	for(uint32_t i = ring.tail(); i != head; i++){
+		const Chunk *c = ring.at(i);
+		if(c->gen != gen)
+			continue;
+		rate = c->rate;
+		have += c->frames;
+	}
+	double step = OalStreamStep(rate, (float)sRate);
+	return rate != 0 && have >= (uint64_t)(frames * step) + 2 * SincHalfFor(step) + kChunkFrames;
+}
+
+bool
+ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs)
+{
+	auto t0 = std::chrono::steady_clock::now();
+	bool settled = false;
+	for(;;){
+		settled = true;
+		for(int s = 0; s < kStreams; s++){
+			uint32_t gen = sShared->status[s].postedGen.load(std::memory_order_acquire);
+			if(gen != 0 && !StreamSettled(sShared->ring[s], sShared->status[s], gen, frames))
+				settled = false;
+		}
+		double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		if(waitedMs)
+			*waitedMs = ms;
+		if(settled || ms >= timeoutMs)
+			return settled;
+		std::this_thread::sleep_for(std::chrono::microseconds(100));
+	}
 }
 
 int

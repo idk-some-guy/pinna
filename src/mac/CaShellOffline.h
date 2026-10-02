@@ -21,6 +21,8 @@ void ShellPostEventForTest(int event, uint32_t id);
 void ShellWaitControlForTest(void);
 bool ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames);
 uint64_t ShellFramesForTest(void);
+// Waits until each stream's posted generation has ended or is prefilled with what a render of frames needs.
+bool ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs);
 int ShellOwnerForTest(void);
 Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
 

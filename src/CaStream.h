@@ -90,6 +90,9 @@ public:
 	void pop(void) { mTail.store(mTail.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
 	uint32_t filled(void) const { return mHead.load(std::memory_order_acquire) - mTail.load(std::memory_order_acquire); }
 	uint32_t mark(void) const { return mHead.load(std::memory_order_relaxed); }
+	uint32_t head(void) const { return mHead.load(std::memory_order_acquire); }
+	uint32_t tail(void) const { return mTail.load(std::memory_order_relaxed); }
+	const Chunk *at(uint32_t i) const { return &mChunks[i % kRingChunks]; }
 	uint32_t filledSince(uint32_t mark) const
 	{
 		uint32_t t = mTail.load(std::memory_order_acquire);
@@ -103,8 +106,8 @@ private:
 struct StreamStatus
 {
 	std::atomic<uint64_t> pos, format;
-	std::atomic<uint32_t> drainedGen, failedGen, prefilledGen, postedGen;
-	StreamStatus(void) : pos(0), format(0), drainedGen(0), failedGen(0), prefilledGen(0), postedGen(0) {}
+	std::atomic<uint32_t> drainedGen, failedGen, prefilledGen, postedGen, endedGen;
+	StreamStatus(void) : pos(0), format(0), drainedGen(0), failedGen(0), prefilledGen(0), postedGen(0), endedGen(0) {}
 	bool position(uint32_t gen, uint32_t *frame, uint32_t *rate) const
 	{
 		uint64_t p = pos.load(std::memory_order_acquire), f = format.load(std::memory_order_acquire);
@@ -128,7 +131,8 @@ private:
 	void reset(uint32_t gen);
 	void fill(ChunkRing &ring, uint64_t need);
 	float fetch(int ch, int64_t idx) const;
-	void fade(void);
+	void fade(ChunkRing *paused = 0);
+	void fadePaused(ChunkRing &ring);
 	uint64_t sourceAt(uint64_t at) const;
 	double audibleAt(uint64_t out) const;
 	float mWin[2][kWindowFrames];
@@ -171,6 +175,7 @@ public:
 	void post(const StreamCommand &c);
 	// Blocks the calling thread until a second of gen is decoded, its open fails, or timeoutMs passes.
 	bool waitPrefilled(uint8_t stream, uint32_t gen, int timeoutMs);
+	// An open or seek followed by another command for its stream in the same batch is dropped; the last one wins.
 	void step(void);
 	uint32_t wakes(void) const { return mWakes.load(std::memory_order_relaxed); }
 private:

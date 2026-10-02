@@ -85,13 +85,17 @@ StreamReader::fill(ChunkRing &ring, uint64_t need)
 }
 
 void
-StreamReader::fade(void)
+StreamReader::fade(ChunkRing *paused)
 {
 	if(!mAudible)
 		return;
 	mAudible = false;
 	if(mStep <= 0.0)
 		return;
+	if(paused){
+		fadePaused(*paused);
+		return;
+	}
 	int64_t i = (int64_t)mPos, heldAt[2];
 	float held[2];
 	for(int ch = 0; ch < 2; ch++){
@@ -125,6 +129,32 @@ StreamReader::fade(void)
 			r[ch] = 0.0f;
 			for(int t = 0; t < taps; t++)
 				r[ch] += (j + first + t > heldAt[ch] ? held[ch] : fetch(ch, j + first + t)) * w[t];
+		}
+		float g = (float)(kOalFadeFrames - k) / kOalFadeFrames;
+		bool old = k < mFadeLeft;
+		next[0][k] = (r[0] * mGain[0] + r[1] * mGain[2]) * g + (old ? mFade[0][at + k] : 0.0f);
+		next[1][k] = (r[0] * mGain[1] + r[1] * mGain[3]) * g + (old ? mFade[1][at + k] : 0.0f);
+	}
+	memcpy(mFade, next, sizeof(next));
+	mFadeLeft = kOalFadeFrames;
+}
+
+void
+StreamReader::fadePaused(ChunkRing &ring)
+{
+	if(!mEof)
+		fill(ring, (uint64_t)(mPos + kOalFadeFrames * mStep) + SincHalfFor(mStep) + 2);
+	float next[2][kOalFadeFrames], w[kSincMaxTaps];
+	uint32_t at = kOalFadeFrames - mFadeLeft;
+	double p = mPos;
+	for(uint32_t k = 0; k < kOalFadeFrames; k++, p += mStep){
+		int64_t j = (int64_t)p;
+		int first;
+		int taps = SincWeights(p - (double)j, mStep, w, &first);
+		float r[2] = { 0.0f, 0.0f };
+		for(int t = 0; t < taps; t++){
+			r[0] += fetch(0, j + first + t) * w[t];
+			r[1] += fetch(1, j + first + t) * w[t];
 		}
 		float g = (float)(kOalFadeFrames - k) / kOalFadeFrames;
 		bool old = k < mFadeLeft;
@@ -178,7 +208,7 @@ StreamReader::render(const StreamSnap &p, ChunkRing &ring, StreamStatus &st, std
 		ring.pop();
 	bool want = p.playing && !p.paused && !mDrained && !superseded;
 	if(!want)
-		fade();
+		fade(p.playing && !mDrained && !superseded ? &ring : 0);
 	if(want && !mStarted)
 		fill(ring, 1);
 	want = want && mStarted;
@@ -353,6 +383,7 @@ StreamWorker::apply(const StreamCommand &c)
 		delete s.dec;
 		s.dec = 0;
 		s.done = true;
+		st.endedGen.store(c.gen, std::memory_order_release);
 		return;
 	}
 	if(c.op == CMD_OPEN){
@@ -419,6 +450,8 @@ StreamWorker::fill(int index)
 		}
 		c->frames = got;
 		ring.endWrite();
+		if(c->eof)
+			mStatus[index].endedGen.store(s.gen, std::memory_order_release);
 	}
 	if(!s.prefilled && (s.done || s.written >= s.rate)){
 		s.prefilled = true;
@@ -447,8 +480,20 @@ StreamWorker::step(void)
 		todo.swap(mQueue);
 		mPending.store(false, std::memory_order_relaxed);
 	}
-	for(size_t i = 0; i < todo.size(); i++)
-		apply(todo[i]);
+	for(size_t i = 0; i < todo.size(); i++){
+		StreamCommand &c = todo[i];
+		size_t j = i + 1;
+		while(c.op != CMD_CLOSE && j < todo.size() && todo[j].stream != c.stream)
+			j++;
+		if(c.op == CMD_CLOSE || j == todo.size()){
+			apply(c);
+			continue;
+		}
+		if(c.op == CMD_OPEN && todo[j].op == CMD_SEEK){
+			todo[j].op = CMD_OPEN;
+			memcpy(todo[j].path, c.path, sizeof(c.path));
+		}
+	}
 	bool starved = false;
 	for(int s = 0; s < kStreams; s++)
 		starved = fill(s) || starved;

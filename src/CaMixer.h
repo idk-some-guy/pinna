@@ -25,6 +25,7 @@ struct Shared
 	std::atomic<uint32_t> activeVoices;
 	std::atomic<uint32_t> underruns;
 	std::atomic<uint32_t> streamLatency;
+	std::atomic<uint32_t> renders;
 	ChunkRing ring[kStreams];
 	StreamStatus status[kStreams];
 	Shared(void);

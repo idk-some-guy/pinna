@@ -243,6 +243,27 @@ ProbeLengthMs(const char *path)
 }
 
 uint32_t
+ProbeUserTrackMs(const char *path)
+{
+	if(!HasExtension(path, ".wav") && !HasExtension(path, ".mp3") && !HasExtension(path, ".adf"))
+		return 0;
+	XorReader x = { NULL, 0 };
+	AudioFileID file = NULL;
+	Float64 seconds = 0.0;
+	AudioStreamBasicDescription format;
+	UInt32 size = sizeof(format);
+	bool ok = OpenAudioFile(path, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr &&
+		format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2;
+	size = sizeof(seconds);
+	ok = ok && AudioFileGetProperty(file, kAudioFilePropertyEstimatedDuration, &size, &seconds) == noErr && seconds > 0.0;
+	if(file)
+		AudioFileClose(file);
+	if(x.file)
+		fclose(x.file);
+	return ok ? (uint32_t)(seconds * 1000.0) : 0;
+}
+
+uint32_t
 LoadStreamLengths(const char *cachePath, const char *const *paths, uint32_t count, uint32_t *lengths)
 {
 	FILE *f = fopen(cachePath, "rb");
