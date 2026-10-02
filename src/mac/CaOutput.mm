@@ -86,6 +86,7 @@ static const AudioObjectPropertyAddress kDeviceProps[] = {
 	{ kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain },
 	{ kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
 	{ kAudioDeviceProcessorOverload, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+	{ kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
 };
 
 struct FlushDenormals
@@ -388,7 +389,7 @@ ClockBlock(uint32_t buffer)
 }
 
 static void
-OutputFormat(double rate, uint32_t buffer, const char *device)
+OutputFormat(double rate, uint32_t buffer, uint32_t latency, const char *device)
 {
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
@@ -396,7 +397,37 @@ OutputFormat(double rate, uint32_t buffer, const char *device)
 		sBuffer = buffer;
 		strlcpy(sDeviceName, device, sizeof(sDeviceName));
 	}
+	if(sShared)
+		sShared->streamLatency.store(latency, std::memory_order_relaxed);
 	sClock.SetFormat(rate, ClockBlock(buffer));
+}
+
+static uint32_t
+DeviceLatency(AudioObjectID dev)
+{
+	UInt32 total = 0;
+	AudioObjectPropertySelector sel[2] = { kAudioDevicePropertyLatency, kAudioDevicePropertySafetyOffset };
+	for(int i = 0; i < 2; i++){
+		AudioObjectPropertyAddress a = { sel[i], kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+		UInt32 v = 0, size = sizeof(v);
+		if(AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &v) == noErr)
+			total += v;
+	}
+	AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+	AudioStreamID streams[16];
+	UInt32 size = 0;
+	if(AudioObjectGetPropertyDataSize(dev, &sa, 0, NULL, &size) != noErr || size < sizeof(AudioStreamID))
+		return total;
+	if(size > sizeof(streams))
+		size = sizeof(streams);
+	if(AudioObjectGetPropertyData(dev, &sa, 0, NULL, &size, streams) != noErr || size < sizeof(AudioStreamID))
+		return total;
+	AudioObjectPropertyAddress la = { kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	UInt32 v = 0;
+	size = sizeof(v);
+	if(AudioObjectGetPropertyData(streams[0], &la, 0, NULL, &size, &v) == noErr)
+		total += v;
+	return total;
 }
 
 static void Rebuild(int event, uint32_t eventId, const char *why);
@@ -415,9 +446,12 @@ DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 {
 	if(sStopping)
 		return;
-	bool gone = false, format = false;
+	bool gone = false, format = false, buffer = false;
 	for(UInt32 i = 0; i < n; i++)
 		switch(a[i].mSelector){
+		case kAudioDevicePropertyBufferFrameSize:
+			buffer = true;
+			break;
 		case kAudioDeviceProcessorOverload:
 			if(dev == sCurrent)
 				CountUnderrun();
@@ -433,6 +467,19 @@ DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 			break;
 		}
 		}
+	if(buffer && !gone && !format && dev == sCurrent){
+		UInt32 frames = 0, size = sizeof(frames);
+		if(AudioObjectGetPropertyData(dev, &kDeviceProps[4], 0, NULL, &size, &frames) == noErr && frames){
+			char name[128];
+			double rate;
+			{
+				std::lock_guard<std::mutex> lock(sInfoLock);
+				strlcpy(name, sDeviceName, sizeof(name));
+				rate = sRate;
+			}
+			OutputFormat(rate, frames, 2 * frames + DeviceLatency(dev), name);
+		}
+	}
 	if(!gone && !format)
 		return;
 	Float64 rate = 0.0;
@@ -512,7 +559,7 @@ OpenOutput(AudioObjectID dev)
 		if(rate <= 0.0)
 			return false;
 		SetupSpatialOrBypass(rate);
-		OutputFormat(rate, 512, name);
+		OutputFormat(rate, 512, 2 * 512, name);
 		sCurrent = dev;
 		sChannels = CurrentChannels(dev);
 		sDrive.Arm();
@@ -537,7 +584,7 @@ OpenOutput(AudioObjectID dev)
 	ok = ok && SetupSpatialOrBypass(rate);
 	ok = ok && AudioUnitInitialize(sOutput) == noErr;
 	if(ok){
-		OutputFormat(rate, buffer, name);
+		OutputFormat(rate, buffer, 2 * buffer + DeviceLatency(dev), name);
 		sCurrent = dev;
 		sChannels = CurrentChannels(dev);
 		sDrive.Arm();
@@ -572,7 +619,7 @@ Rebuild(int event, uint32_t eventId, const char *why)
 		}
 	}
 	if(!ok)
-		OutputFormat(sRate, sBuffer, "none");
+		OutputFormat(sRate, sBuffer, 0, "none");
 	if(!ok && c.id != kAudioObjectUnknown && event != EVENT_RETRY){
 		uint32_t session = sSession;
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{
@@ -668,7 +715,7 @@ ShellStart(Shared *shared, const char *deviceUid)
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sRebuilds = 0;
 	}
-	OutputFormat(kFallbackRate, 512, "none");
+	OutputFormat(kFallbackRate, 512, 0, "none");
 	sDrive.ToClock();
 	sClock.Start(&sDrive, ClockRender, NULL, kFallbackRate, 512);
 	EnsureControl();
@@ -757,7 +804,7 @@ ShellStartOffline(Shared *shared, double rate)
 	sShared = shared;
 	sMixer = new Mixer(shared);
 	sSampleTime = 0;
-	OutputFormat(rate, 512, "offline");
+	OutputFormat(rate, 512, 0, "offline");
 	return SetupSpatialOrBypass(rate);
 }
 
@@ -790,7 +837,7 @@ ShellRebuildOfflineForTest(double rate)
 	DisposeUnit(&sSpatial);
 	DisposeUnit(&sReverb);
 	SetupSpatialOrBypass(rate);
-	OutputFormat(rate, sBuffer, "offline");
+	OutputFormat(rate, sBuffer, 0, "offline");
 	std::lock_guard<std::mutex> lock(sInfoLock);
 	sRebuilds++;
 	return !sSpatialBypass;

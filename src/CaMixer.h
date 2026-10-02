@@ -5,15 +5,9 @@
 #include "CaVoice.h"
 #include "CaHandoff.h"
 #include "CaFilter.h"
+#include "CaStream.h"
 
 namespace ca {
-
-struct StreamSnap
-{
-	uint32_t gen;
-	uint8_t playing, paused;
-	float ll, lr, rl, rr;
-};
 
 struct Snapshot
 {
@@ -30,6 +24,9 @@ struct Shared
 	std::atomic<uint32_t> latchedSerial;
 	std::atomic<uint32_t> activeVoices;
 	std::atomic<uint32_t> underruns;
+	std::atomic<uint32_t> streamLatency;
+	ChunkRing ring[kStreams];
+	StreamStatus status[kStreams];
 	Shared(void);
 };
 
@@ -46,6 +43,7 @@ private:
 	float mShelfHF[kChannels];
 	float mShelfRate;
 	float mVoiceSend[kMaxBlock];
+	StreamReader mReader[kStreams];
 };
 
 }

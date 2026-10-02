@@ -3,7 +3,7 @@
 
 namespace ca {
 
-Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0)
+Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLatency(0)
 {
 	for(int c = 0; c < kChannels; c++){
 		finishedId[c].store(0);
@@ -75,6 +75,9 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(!st.active)
 			mShared->readerSlot[c].store(-1, std::memory_order_release);
 	}
+	uint32_t latency = mShared->streamLatency.load(std::memory_order_relaxed);
+	for(int st = 0; st < kStreams; st++)
+		mReader[st].render(s.stream[st], mShared->ring[st], mShared->status[st], mShared->underruns, outRate, latency, strL, strR, frames);
 	mShelfRate = outRate;
 	mShared->latchedSerial.store(s.serial, std::memory_order_release);
 	mShared->activeVoices.store(active, std::memory_order_relaxed);
