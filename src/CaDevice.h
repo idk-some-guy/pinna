@@ -34,7 +34,9 @@ enum
 	EVENT_DEVICES_CHANGED,
 	EVENT_WAKE,
 	EVENT_PIN,
-	EVENT_START
+	EVENT_START,
+	EVENT_RETRY,
+	EVENT_NONE = -1
 };
 
 inline bool
@@ -81,17 +83,29 @@ FindPin(const char *pinnedUid, const DeviceEntry *list, int count, uint32_t curr
 inline bool
 NeedsRebuild(int event, bool followingDefault, uint32_t currentId, uint32_t eventId, bool pinnedPresent, bool pinnedIsCurrent)
 {
+	if(currentId == 0)
+		return true;
 	switch(event){
 	case EVENT_DEFAULT_CHANGED:
-		return followingDefault || !pinnedPresent;
+		return (followingDefault || !pinnedPresent) && eventId != currentId;
 	case EVENT_RATE_CHANGED:
 	case EVENT_DEVICE_GONE:
 		return eventId == currentId;
 	case EVENT_DEVICES_CHANGED:
 		return !followingDefault && pinnedPresent && !pinnedIsCurrent;
+	case EVENT_RETRY:
+		return false;
 	default:
 		return true;
 	}
+}
+
+inline int
+DeviceBatchEvent(bool gone, bool formatTouched, double rate, uint32_t channels, double newRate, uint32_t newChannels)
+{
+	if(gone)
+		return EVENT_DEVICE_GONE;
+	return formatTouched && (newRate != rate || newChannels != channels) ? EVENT_RATE_CHANGED : EVENT_NONE;
 }
 
 inline bool

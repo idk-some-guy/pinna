@@ -29,6 +29,9 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 	memset(strL, 0, frames * sizeof(float));
 	memset(strR, 0, frames * sizeof(float));
 	const Snapshot &s = mShared->snapshot.read();
+	if(outRate != mShelfRate)
+		for(int c = 0; c < kChannels; c++)
+			mShelfHF[c] = -1.0f;
 	uint32_t active = 0;
 	for(int c = 0; c < kChannels; c++){
 		const VoiceSnap &sn = s.voice[c];
@@ -50,7 +53,7 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(st.active)
 			active++;
 		Biquad &shelf = mShelf[c];
-		if(sn.sendHF != mShelfHF[c] || outRate != mShelfRate){
+		if(sn.sendHF != mShelfHF[c]){
 			HighShelf(shelf, 5000.0f, outRate, sn.sendHF);
 			mShelfHF[c] = sn.sendHF;
 		}

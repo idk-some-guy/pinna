@@ -46,6 +46,8 @@ static uint32_t sListGeneration;
 static uint32_t sDefaultId;
 static char sPinned[128] = "default";
 static AudioObjectID sCurrent;
+static uint32_t sChannels;
+static uint32_t sSession;
 static AudioObjectPropertyListenerBlock sSystemListener, sDeviceListener;
 static id sWakeObserver;
 
@@ -399,11 +401,21 @@ OutputFormat(double rate, uint32_t buffer, const char *device)
 
 static void Rebuild(int event, uint32_t eventId, const char *why);
 
+static uint32_t
+CurrentChannels(AudioObjectID dev)
+{
+	for(int i = 0; i < sNumDevices; i++)
+		if(sDevices[i].id == dev)
+			return sDevices[i].outputChannels;
+	return 0;
+}
+
 static void
 DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 {
 	if(sStopping)
 		return;
+	bool gone = false, format = false;
 	for(UInt32 i = 0; i < n; i++)
 		switch(a[i].mSelector){
 		case kAudioDeviceProcessorOverload:
@@ -411,18 +423,28 @@ DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 				CountUnderrun();
 			break;
 		case kAudioDevicePropertyNominalSampleRate:
-			Rebuild(EVENT_RATE_CHANGED, dev, "rate changed");
-			break;
 		case kAudioDevicePropertyStreamConfiguration:
-			Rebuild(EVENT_RATE_CHANGED, dev, "format changed");
+			format = true;
 			break;
 		case kAudioDevicePropertyDeviceIsAlive: {
 			UInt32 alive = 0, size = sizeof(alive);
 			if(AudioObjectGetPropertyData(dev, &kDeviceProps[2], 0, NULL, &size, &alive) != noErr || !alive)
-				Rebuild(EVENT_DEVICE_GONE, dev, "device lost");
+				gone = true;
 			break;
 		}
 		}
+	if(!gone && !format)
+		return;
+	Float64 rate = 0.0;
+	UInt32 size = sizeof(rate);
+	DeviceEntry e;
+	if(!gone){
+		AudioObjectGetPropertyData(dev, &kDeviceProps[0], 0, NULL, &size, &rate);
+		ReadDevice(dev, e);
+	}
+	int event = DeviceBatchEvent(gone, format, sRate, sChannels, rate, gone ? 0 : e.outputChannels);
+	if(event != EVENT_NONE)
+		Rebuild(event, dev, gone ? "device lost" : rate != sRate ? "rate changed" : "format changed");
 }
 
 static void
@@ -492,6 +514,7 @@ OpenOutput(AudioObjectID dev)
 		SetupSpatialOrBypass(rate);
 		OutputFormat(rate, 512, name);
 		sCurrent = dev;
+		sChannels = CurrentChannels(dev);
 		sDrive.Arm();
 		return true;
 	}
@@ -516,6 +539,7 @@ OpenOutput(AudioObjectID dev)
 	if(ok){
 		OutputFormat(rate, buffer, name);
 		sCurrent = dev;
+		sChannels = CurrentChannels(dev);
 		sDrive.Arm();
 		ok = AudioOutputUnitStart(sOutput) == noErr;
 	}
@@ -549,6 +573,13 @@ Rebuild(int event, uint32_t eventId, const char *why)
 	}
 	if(!ok)
 		OutputFormat(sRate, sBuffer, "none");
+	if(!ok && c.id != kAudioObjectUnknown && event != EVENT_RETRY){
+		uint32_t session = sSession;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{
+			if(session == sSession)
+				Rebuild(EVENT_RETRY, 0, "retry");
+		});
+	}
 	if(event != EVENT_START){
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sRebuilds++;
@@ -586,9 +617,27 @@ WatchSystem(void)
 	};
 	for(size_t i = 0; i < sizeof(kSystemProps) / sizeof(kSystemProps[0]); i++)
 		AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &kSystemProps[i], sControl, sSystemListener);
+}
+
+static void
+WatchWake(void)
+{
+#ifdef CA_SHELL_OFFLINE
+	if(sFake)
+		return;
+#endif
 	sWakeObserver = [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *) {
 		dispatch_async(sControl, ^{ Rebuild(EVENT_WAKE, 0, "wake"); });
 	}];
+}
+
+static void
+UnwatchWake(void)
+{
+	if(sWakeObserver){
+		[[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:sWakeObserver];
+		sWakeObserver = nil;
+	}
 }
 
 static void
@@ -598,10 +647,6 @@ UnwatchSystem(void)
 		for(size_t i = 0; i < sizeof(kSystemProps) / sizeof(kSystemProps[0]); i++)
 			AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &kSystemProps[i], sControl, sSystemListener);
 		sSystemListener = nil;
-	}
-	if(sWakeObserver){
-		[[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:sWakeObserver];
-		sWakeObserver = nil;
 	}
 }
 
@@ -630,19 +675,23 @@ ShellStart(Shared *shared, const char *deviceUid)
 	const char *pin = deviceUid && deviceUid[0] ? deviceUid : "default";
 	dispatch_sync(sControl, ^{
 		sStopping = false;
+		sSession++;
 		strlcpy(sPinned, pin, sizeof(sPinned));
 		WatchSystem();
 		Rebuild(EVENT_START, 0, "start");
 	});
+	WatchWake();
 	return true;
 }
 
 void
 ShellStop(void)
 {
+	UnwatchWake();
 	if(sControl)
 		dispatch_sync(sControl, ^{
 			sStopping = true;
+			sSession++;
 			UnwatchSystem();
 			StopOutput();
 		});
@@ -772,7 +821,7 @@ ShellFakeDevicesForTest(const DeviceEntry *list, const double *rates, int count,
 void
 ShellPostEventForTest(int event, uint32_t id)
 {
-	static const char *const why[] = { "default output changed", "rate changed", "device lost", "devices changed", "wake", "device chosen", "start" };
+	static const char *const why[] = { "default output changed", "rate changed", "device lost", "devices changed", "wake", "device chosen", "start", "retry" };
 	dispatch_sync(sControl, ^{ Rebuild(event, id, why[event]); });
 }
 

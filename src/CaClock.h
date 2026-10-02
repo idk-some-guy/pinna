@@ -12,7 +12,7 @@ typedef void (*ClockRenderFn)(void *ctx, uint32_t frames, double rate);
 class Clock
 {
 public:
-	enum { kStallTicks = 4, kMaxLagTicks = 8 };
+	enum { kStallMs = 150, kWatchMs = 20, kMaxLagTicks = 8 };
 
 	Clock(void);
 	~Clock(void);
@@ -21,6 +21,7 @@ public:
 	void SetFormat(double rate, uint32_t block);
 	bool Running(void) const { return mThread.joinable(); }
 	uint32_t Stalls(void) const { return mStalls.load(std::memory_order_acquire); }
+	uint32_t Wakes(void) const { return mWakes.load(std::memory_order_relaxed); }
 
 private:
 	void Run(void);
@@ -32,6 +33,7 @@ private:
 	std::atomic<uint32_t> mBlock;
 	std::atomic<bool> mRun;
 	std::atomic<uint32_t> mStalls;
+	std::atomic<uint32_t> mWakes;
 	std::thread mThread;
 };
 
