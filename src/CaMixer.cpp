@@ -3,7 +3,7 @@
 
 namespace ca {
 
-Shared::Shared(void) : activeVoices(0), underruns(0)
+Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0)
 {
 	for(int c = 0; c < kChannels; c++){
 		finishedId[c].store(0);
@@ -32,6 +32,8 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(sn.playId != st.playId){
 			StartVoice(st, sn);
 			mShared->readerSlot[c].store(st.active ? sn.poolSlot : -1, std::memory_order_release);
+			if(!st.active)
+				mShared->finishedId[c].store(st.playId, std::memory_order_release);
 		}
 		if(!st.active)
 			continue;
@@ -41,6 +43,7 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(!st.active)
 			mShared->readerSlot[c].store(-1, std::memory_order_release);
 	}
+	mShared->latchedSerial.store(s.serial, std::memory_order_release);
 	mShared->activeVoices.store(active, std::memory_order_relaxed);
 }
 

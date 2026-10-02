@@ -37,11 +37,11 @@ private:
 };
 
 inline int
-PickPoolSlot(const int8_t *mirrorSlots, const std::atomic<int32_t> *readerSlots, int channels, int poolSize, int *cursor)
+PickPoolSlot(const int8_t *mirrorSlots, const std::atomic<int32_t> *readerSlots, const uint32_t *slotRef, uint32_t latched, int channels, int poolSize, int *cursor)
 {
 	for(int k = 0; k < poolSize; k++){
 		int s = (*cursor + k) % poolSize;
-		bool used = false;
+		bool used = (int32_t)(latched - slotRef[s]) <= 0;
 		for(int c = 0; c < channels && !used; c++)
 			used = mirrorSlots[c] == s || readerSlots[c].load(std::memory_order_acquire) == s;
 		if(!used){

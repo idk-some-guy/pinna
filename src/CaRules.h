@@ -112,21 +112,4 @@ Mp3BoostMult(uint32_t boost, bool userTrack, bool interrupted)
 	return userTrack && !interrupted ? boost / 64.f : 0.0f;
 }
 
-inline void
-OalDirection(float gx, float gy, float gz, float *azDeg, float *elDeg, float *dist)
-{
-	float x = -gx, y = gy, z = gz;
-	float d = sqrtf(x * x + y * y + z * z);
-	*dist = d;
-	if(d == 0.0f){
-		*azDeg = 0.0f;
-		*elDeg = 0.0f;
-		return;
-	}
-	*azDeg = atan2f(x, y) * (180.0f / 3.14159265f);
-	float s = z / d;
-	s = s > 1.0f ? 1.0f : s < -1.0f ? -1.0f : s;
-	*elDeg = asinf(s) * (180.0f / 3.14159265f);
-}
-
 }

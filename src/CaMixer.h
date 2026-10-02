@@ -26,6 +26,7 @@ struct Shared
 	TripleBuffer<Snapshot> snapshot;
 	std::atomic<uint32_t> finishedId[kChannels];
 	std::atomic<int32_t> readerSlot[kChannels];
+	std::atomic<uint32_t> latchedSerial;
 	std::atomic<uint32_t> activeVoices;
 	std::atomic<uint32_t> underruns;
 	Shared(void);
