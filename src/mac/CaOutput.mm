@@ -45,6 +45,7 @@ static std::mutex sInfoLock;
 static DeviceEntry sDevices[kMaxDevices];
 static int sNumDevices;
 static uint32_t sListGeneration;
+static bool sFellBack;
 static uint32_t sDefaultId;
 static char sPinned[128] = "default";
 static AudioObjectID sCurrent;
@@ -630,9 +631,11 @@ Rebuild(int event, uint32_t eventId, const char *why)
 				Rebuild(EVENT_RETRY, 0, "retry");
 		});
 	}
-	if(event != EVENT_START){
+	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
-		sRebuilds++;
+		sFellBack = !FollowsDefault(sPinned) && (c.fellBack || !ok);
+		if(event != EVENT_START)
+			sRebuilds++;
 	}
 	if(!ok)
 		printf("sampman_ca: no output device (%s), a silent clock drives the engine at %.0f Hz\n", why, sRate);
@@ -999,6 +1002,7 @@ ShellGetInfo(void)
 	i.rebuilds = sRebuilds;
 	i.stalls = sClock.Stalls();
 	i.spatialBypassed = sSpatialBypass;
+	i.fellBack = sFellBack;
 	strncpy(i.device, sDeviceName, sizeof(i.device) - 1);
 	i.device[sizeof(i.device) - 1] = '\0';
 	return i;

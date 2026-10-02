@@ -28,5 +28,6 @@ bool ShellWaitPrefilledForTest(uint8_t stream, int timeoutMs, double *waitedMs);
 int ShellOwnerForTest(void);
 void ShellClockTimeForTest(ClockTime *time);
 Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
+uint32_t UserTrackProbesForTest(void);
 
 }

@@ -49,6 +49,33 @@ HasExtension(const char *path, const char *ext)
 }
 
 static bool
+IsGameFormat(const char *path)
+{
+	return HasExtension(path, ".wav") || HasExtension(path, ".mp3") || HasExtension(path, ".adf");
+}
+
+static bool
+IsUserFormat(const char *path)
+{
+	return HasExtension(path, ".m4a") || HasExtension(path, ".aac") || HasExtension(path, ".flac") || HasExtension(path, ".aif") ||
+		HasExtension(path, ".aiff");
+}
+
+static void
+FloatClient(AudioStreamBasicDescription *client, Float64 rate, UInt32 channels)
+{
+	memset(client, 0, sizeof(*client));
+	client->mSampleRate = rate;
+	client->mFormatID = kAudioFormatLinearPCM;
+	client->mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+	client->mChannelsPerFrame = channels;
+	client->mBitsPerChannel = 32;
+	client->mBytesPerFrame = 4 * channels;
+	client->mFramesPerPacket = 1;
+	client->mBytesPerPacket = 4 * channels;
+}
+
+static bool
 OpenAudioFile(const char *path, XorReader *x, AudioFileID *file)
 {
 	if(HasExtension(path, ".adf")){
@@ -113,15 +140,7 @@ public:
 		if(mChannels < 1 || mChannels > 2)
 			return false;
 		AudioStreamBasicDescription client;
-		memset(&client, 0, sizeof(client));
-		client.mSampleRate = file.mSampleRate;
-		client.mFormatID = kAudioFormatLinearPCM;
-		client.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-		client.mChannelsPerFrame = mChannels;
-		client.mBitsPerChannel = 32;
-		client.mBytesPerFrame = 4 * mChannels;
-		client.mFramesPerPacket = 1;
-		client.mBytesPerPacket = 4 * mChannels;
+		FloatClient(&client, file.mSampleRate, mChannels);
 		if(ExtAudioFileSetProperty(mExt, kExtAudioFileProperty_ClientDataFormat, sizeof(client), &client) != noErr)
 			return false;
 		SInt64 frames = 0;
@@ -222,12 +241,20 @@ OpenApple(const char *path, bool corrections)
 Decoder *
 OpenDecoder(const char *path)
 {
-	if(HasExtension(path, ".wav") || HasExtension(path, ".mp3") || HasExtension(path, ".adf"))
+	if(IsGameFormat(path) || IsUserFormat(path))
 		return OpenApple(path, true);
 	return NULL;
 }
 
+static uint32_t gUserTrackProbes;
+
 #ifdef CA_SHELL_OFFLINE
+uint32_t
+UserTrackProbesForTest(void)
+{
+	return gUserTrackProbes;
+}
+
 Decoder *
 OpenAppleDecoderForTest(const char *path, bool corrections)
 {
@@ -244,38 +271,96 @@ ProbeLengthMs(const char *path)
 	return ms;
 }
 
-uint32_t
-ProbeUserTrackMs(const char *path)
+static uint32_t
+Verdict(bool *definitive, bool fromFile, uint32_t ms)
 {
-	if(!HasExtension(path, ".wav") && !HasExtension(path, ".mp3") && !HasExtension(path, ".adf"))
-		return 0;
+	if(definitive)
+		*definitive = fromFile;
+	return ms;
+}
+
+uint32_t
+ProbeUserTrackMs(const char *path, bool *definitive)
+{
+	if(IsUserFormat(path) && !HasExtension(path, ".aac")){
+		AudioFileID file = NULL;
+		AudioStreamBasicDescription format;
+		AudioFilePacketTableInfo table;
+		UInt64 packets = 0;
+		UInt32 size = sizeof(format);
+		XorReader x = { NULL, 0 };
+		bool opened = OpenAudioFile(path, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
+		bool ok = opened && format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2 && format.mSampleRate > 0.0 && format.mFormatID != 'paac' &&
+			format.mFormatID != 'drms';
+		uint64_t frames = 0;
+		size = sizeof(table);
+		if(ok && AudioFileGetProperty(file, kAudioFilePropertyPacketTableInfo, &size, &table) == noErr && table.mNumberValidFrames > 0)
+			frames = (uint64_t)table.mNumberValidFrames;
+		else if(ok && format.mFormatID == kAudioFormatLinearPCM && format.mFramesPerPacket == 1){
+			size = sizeof(packets);
+			if(AudioFileGetProperty(file, kAudioFilePropertyAudioDataPacketCount, &size, &packets) == noErr)
+				frames = packets;
+		}
+		if(file)
+			AudioFileClose(file);
+		if(!ok || frames > 0)
+			return Verdict(definitive, opened, ok ? LengthMs(frames, (uint32_t)format.mSampleRate) : 0);
+	}
+	if(IsUserFormat(path)){
+		Decoder *d = OpenApple(path, true);
+		float first[64 * 2];
+		uint32_t ms = d && d->read(first, 64) > 0 ? LengthMs(d->lengthFrames(), d->rate()) : 0;
+		bool opened = d != NULL;
+		delete d;
+		return Verdict(definitive, opened, ms);
+	}
+	if(!IsGameFormat(path))
+		return Verdict(definitive, true, 0);
 	XorReader x = { NULL, 0 };
 	AudioFileID file = NULL;
 	Float64 seconds = 0.0;
 	AudioStreamBasicDescription format;
 	UInt32 size = sizeof(format);
-	bool ok = OpenAudioFile(path, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr &&
-		format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2;
+	bool opened = OpenAudioFile(path, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
+	bool ok = opened && format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2;
 	size = sizeof(seconds);
-	ok = ok && AudioFileGetProperty(file, kAudioFilePropertyEstimatedDuration, &size, &seconds) == noErr && seconds > 0.0;
+	bool timed = ok && AudioFileGetProperty(file, kAudioFilePropertyEstimatedDuration, &size, &seconds) == noErr;
 	if(file)
 		AudioFileClose(file);
 	if(x.file)
 		fclose(x.file);
-	return ok ? (uint32_t)(seconds * 1000.0) : 0;
+	return Verdict(definitive, opened && (!ok || timed), timed && seconds > 0.0 ? (uint32_t)(seconds * 1000.0) : 0);
 }
 
-static void
+static bool
 FileStamp(const char *path, uint64_t *size, int64_t *mtimeNs)
 {
 	struct stat st;
 	if(stat(path, &st) != 0){
 		*size = 0;
 		*mtimeNs = 0;
-		return;
+		return false;
 	}
 	*size = (uint64_t)st.st_size;
 	*mtimeNs = (int64_t)st.st_mtimespec.tv_sec * 1000000000 + st.st_mtimespec.tv_nsec;
+	return true;
+}
+
+uint32_t
+UserTrackLengthMs(TrackLengthCache *cache, const char *path)
+{
+	uint64_t size;
+	int64_t mtimeNs;
+	uint32_t ms;
+	bool definitive = true;
+	bool stamped = FileStamp(path, &size, &mtimeNs);
+	if(!stamped || !cache->find(path, size, mtimeNs, &ms)){
+		ms = ProbeUserTrackMs(path, &definitive);
+		gUserTrackProbes++;
+	}
+	if(stamped && (ms > 0 || definitive))
+		cache->keep(path, size, mtimeNs, ms);
+	return ms;
 }
 
 uint32_t

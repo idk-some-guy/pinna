@@ -119,9 +119,11 @@ inline void
 MenuName(const char *utf8, char *out, size_t size)
 {
 	size_t n = 0;
-	for(; utf8[n] != '\0' && n + 1 < size; n++){
-		unsigned char ch = (unsigned char)utf8[n];
-		out[n] = ch >= 0x80 ? '?' : ch >= 'a' && ch <= 'z' ? (char)(ch - 'a' + 'A') : (char)ch;
+	for(size_t i = 0; utf8[i] != '\0' && n + 1 < size; i++){
+		unsigned char ch = (unsigned char)utf8[i];
+		if(ch >= 0x80 && ch < 0xC0 && i > 0 && (unsigned char)utf8[i - 1] >= 0x80)
+			continue;
+		out[n++] = ch >= 0x80 ? '?' : ch == '~' ? ' ' : ch >= 'a' && ch <= 'z' ? (char)(ch - 'a' + 'A') : (char)ch;
 	}
 	out[n] = '\0';
 }
