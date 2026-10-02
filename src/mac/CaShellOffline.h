@@ -22,5 +22,6 @@ void ShellWaitControlForTest(void);
 bool ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames);
 uint64_t ShellFramesForTest(void);
 int ShellOwnerForTest(void);
+Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
 
 }
