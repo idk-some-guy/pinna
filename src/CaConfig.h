@@ -7,15 +7,14 @@ namespace ca {
 enum
 {
 	kChannels = 44,
-	kChannels3D = 43,
-	kPoliceRadio = 43,
 	kStreams = 3,
 	kMaxBlock = 4096,
 	kPoolSlots = 96,
 	kOalFadeFrames = 64,
 	kOalResamplerEdge = 24,
 	kOalMaxPitch = 10,
-	kOalStepOne = 65536
+	kOalStepOne = 65536,
+	kFallbackRate = 48000
 };
 
 enum

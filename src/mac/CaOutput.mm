@@ -522,7 +522,7 @@ OpenOutput(AudioObjectID dev)
 	sOutput = MakeUnit(kAudioUnitType_Output, kAudioUnitSubType_HALOutput);
 	if(sOutput == NULL)
 		return false;
-	Float64 rate = 48000.0;
+	Float64 rate = kFallbackRate;
 	UInt32 size = sizeof(rate), buffer = 512, maxFrames = kMaxBlock;
 	AudioObjectGetPropertyData(dev, &kDeviceProps[0], 0, NULL, &size, &rate);
 	AudioObjectPropertyAddress bufAddr = { kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
@@ -668,9 +668,9 @@ ShellStart(Shared *shared, const char *deviceUid)
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sRebuilds = 0;
 	}
-	OutputFormat(48000.0, 512, "none");
+	OutputFormat(kFallbackRate, 512, "none");
 	sDrive.ToClock();
-	sClock.Start(&sDrive, ClockRender, NULL, 48000.0, 512);
+	sClock.Start(&sDrive, ClockRender, NULL, kFallbackRate, 512);
 	EnsureControl();
 	const char *pin = deviceUid && deviceUid[0] ? deviceUid : "default";
 	dispatch_sync(sControl, ^{

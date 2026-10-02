@@ -138,9 +138,7 @@ OalSendFilter(float mix)
 static const float kCaveDecayTime = 2.91f;
 static const float kCaveDecayHFRatio = 1.30f;
 static const float kCaveRoomMb = -1000.0f;
-static const float kCaveReflectionsMb = -602.0f;
 static const float kCaveReflectionsDelay = 0.015f;
-static const float kCaveLateMb = -302.0f;
 static const float kCaveLateDelay = 0.022f;
 
 inline float

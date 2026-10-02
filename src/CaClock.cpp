@@ -2,11 +2,12 @@
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
+#include "CaConfig.h"
 #include "CaClock.h"
 
 namespace ca {
 
-Clock::Clock(void) : mDrive(NULL), mRender(NULL), mCtx(NULL), mRate(48000.0), mBlock(512), mRun(false), mStalls(0), mWakes(0) {}
+Clock::Clock(void) : mDrive(NULL), mRender(NULL), mCtx(NULL), mRate(kFallbackRate), mBlock(512), mRun(false), mStalls(0), mWakes(0) {}
 
 Clock::~Clock(void)
 {
@@ -37,7 +38,7 @@ Clock::Stop(void)
 void
 Clock::SetFormat(double rate, uint32_t block)
 {
-	mRate.store(rate > 0.0 ? rate : 48000.0, std::memory_order_release);
+	mRate.store(rate > 0.0 ? rate : (double)kFallbackRate, std::memory_order_release);
 	mBlock.store(block > 0 ? block : 512, std::memory_order_release);
 }
 
