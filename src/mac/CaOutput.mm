@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "CaShell.h"
+#include "CaRules.h"
 
 namespace ca {
 
@@ -11,7 +12,7 @@ bool gShellOffline;
 
 static Shared *sShared;
 static Mixer *sMixer;
-static AudioUnit sOutput, sSpatial;
+static AudioUnit sOutput, sSpatial, sReverb;
 static bool sSpatialBypass;
 static double sRate;
 static uint32_t sBuffer;
@@ -19,7 +20,33 @@ static uint32_t sRebuilds;
 static Float64 sSampleTime;
 static char sDeviceName[128];
 static float sDryL[kMaxBlock], sDryR[kMaxBlock], sSend[kMaxBlock], sStrL[kMaxBlock], sStrR[kMaxBlock];
+static float sWetL[kMaxBlock], sWetR[kMaxBlock];
 static const float *sFeed[2] = { sDryL, sDryR };
+static const float *sSendFeed[2] = { sSend, sSend };
+
+struct ReverbParam
+{
+	AudioUnitParameterID id;
+	AudioUnitParameterValue value;
+};
+
+static const ReverbParam kCaveOnReverb2[] = {
+	{ kReverb2Param_DryWetMix, 100.0f },
+	{ kReverb2Param_Gain, kCaveRoomMb / 100.0f },
+	{ kReverb2Param_MinDelayTime, kCaveReflectionsDelay },
+	{ kReverb2Param_MaxDelayTime, kCaveReflectionsDelay + kCaveLateDelay },
+	{ kReverb2Param_DecayTimeAt0Hz, kCaveDecayTime },
+	{ kReverb2Param_DecayTimeAtNyquist, kCaveDecayTime * kCaveDecayHFRatio },
+};
+
+struct FlushDenormals
+{
+#if defined(__aarch64__)
+	uint64_t saved;
+	FlushDenormals(void) : saved(__builtin_arm_rsr64("fpcr")) { __builtin_arm_wsr64("fpcr", saved | (1ull << 24)); }
+	~FlushDenormals(void) { __builtin_arm_wsr64("fpcr", saved); }
+#endif
+};
 
 static AudioStreamBasicDescription
 StereoFormat(double rate)
@@ -89,6 +116,31 @@ SetupSpatial(double rate)
 	return ok;
 }
 
+static void
+SetupReverb(double rate)
+{
+	DisposeUnit(&sReverb);
+	sReverb = MakeUnit(kAudioUnitType_Effect, kAudioUnitSubType_Reverb2);
+	if(sReverb == NULL){
+		printf("sampman_ca: reverb unavailable\n");
+		return;
+	}
+	UInt32 maxFrames = kMaxBlock;
+	AudioStreamBasicDescription f = StereoFormat(rate);
+	AURenderCallbackStruct cb = { FeedStereo, (void *)sSendFeed };
+	bool ok = AudioUnitSetProperty(sReverb, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof(maxFrames)) == noErr;
+	ok = ok && AudioUnitSetProperty(sReverb, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof(f)) == noErr;
+	ok = ok && AudioUnitSetProperty(sReverb, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &f, sizeof(f)) == noErr;
+	ok = ok && AudioUnitSetProperty(sReverb, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof(cb)) == noErr;
+	ok = ok && AudioUnitInitialize(sReverb) == noErr;
+	for(size_t i = 0; ok && i < sizeof(kCaveOnReverb2) / sizeof(kCaveOnReverb2[0]); i++)
+		ok = AudioUnitSetParameter(sReverb, kCaveOnReverb2[i].id, kAudioUnitScope_Global, 0, kCaveOnReverb2[i].value, 0) == noErr;
+	if(!ok){
+		DisposeUnit(&sReverb);
+		printf("sampman_ca: reverb unavailable\n");
+	}
+}
+
 static bool
 PullStereo(AudioUnit u, float *L, float *R, UInt32 frames)
 {
@@ -116,6 +168,11 @@ RenderBlock(float *L, float *R, UInt32 frames)
 		memcpy(L, sDryL, frames * sizeof(float));
 		memcpy(R, sDryR, frames * sizeof(float));
 	}
+	if(sReverb && PullStereo(sReverb, sWetL, sWetR, frames))
+		for(UInt32 i = 0; i < frames; i++){
+			L[i] += sWetL[i];
+			R[i] += sWetR[i];
+		}
 	for(UInt32 i = 0; i < frames; i++){
 		L[i] += sStrL[i];
 		R[i] += sStrR[i];
@@ -128,6 +185,7 @@ OutputRender(void *, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt3
 {
 	float *L = (float *)io->mBuffers[0].mData;
 	float *R = (float *)io->mBuffers[1].mData;
+	FlushDenormals ftz;
 	for(UInt32 done = 0; done < frames;){
 		UInt32 n = frames - done < (UInt32)kMaxBlock ? frames - done : (UInt32)kMaxBlock;
 		RenderBlock(L + done, R + done, n);
@@ -166,6 +224,7 @@ SetupSpatialOrBypass(double rate)
 	sSpatialBypass = !SetupSpatial(rate);
 	if(sSpatialBypass)
 		printf("sampman_ca: spatial mixer unavailable, classic stereo bypasses it\n");
+	SetupReverb(rate);
 	return true;
 }
 
@@ -221,6 +280,7 @@ ShellStop(void)
 		AudioOutputUnitStop(sOutput);
 	DisposeUnit(&sOutput);
 	DisposeUnit(&sSpatial);
+	DisposeUnit(&sReverb);
 	delete sMixer;
 	sMixer = NULL;
 	sShared = NULL;
@@ -241,6 +301,7 @@ ShellStartOffline(Shared *shared, double rate)
 void
 ShellRenderOffline(float *L, float *R, uint32_t frames)
 {
+	FlushDenormals ftz;
 	for(uint32_t done = 0; done < frames;){
 		uint32_t n = frames - done < (uint32_t)kMaxBlock ? frames - done : (uint32_t)kMaxBlock;
 		RenderBlock(L + done, R + done, n);

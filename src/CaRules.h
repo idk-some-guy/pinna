@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <math.h>
+#include <float.h>
 #include "CaConfig.h"
 
 namespace ca {
@@ -15,6 +16,18 @@ OalInverseClampedGain(float dist, float ref, float maxDist)
 		maxDist = ref;
 	float d = dist < ref ? ref : dist > maxDist ? maxDist : dist;
 	return ref / d;
+}
+
+struct SourceDistances
+{
+	float ref, maxDist;
+};
+
+inline SourceDistances
+OalSourceDefaultDistances(void)
+{
+	SourceDistances d = { 1.0f, FLT_MAX };
+	return d;
 }
 
 inline uint32_t
@@ -76,6 +89,68 @@ EfxSendLevel(float ratio)
 {
 	float level = ratio * 0.8f;
 	return level > 1.0f ? 1.0f : level;
+}
+
+struct ReverbLevelState
+{
+	float prevRatio, level;
+};
+
+inline bool
+UpdateReverbLevel(ReverbLevelState &st, uint32_t frameCounter, const float ceil[4], float north, float south, float west, float east)
+{
+	if(frameCounter & 15)
+		return false;
+	float ratio = ReverbRatio(ceil, north, south, west, east);
+	if(ratio == st.prevRatio)
+		return false;
+	st.level = EfxSendLevel(ratio);
+	st.prevRatio = ratio;
+	return true;
+}
+
+struct SendFilter
+{
+	float gain, gainHF;
+};
+
+inline float
+OalGainToMb(float gain)
+{
+	return gain > 1e-5f ? (float)(log10f(gain) * 2000.0f) : -10000l;
+}
+
+inline float
+OalMbToGain(float mb)
+{
+	return mb > -10000.0f ? powf(10.0f, mb / 2000.0f) : 0.0f;
+}
+
+inline SendFilter
+OalSendFilter(float mix)
+{
+	long mbvol = (long)OalGainToMb(mix);
+	float mb = (float)mbvol;
+	SendFilter f = { OalMbToGain(mb < 0.0f ? mb : 0.0f), OalMbToGain(mb) };
+	return f;
+}
+
+static const float kCaveDecayTime = 2.91f;
+static const float kCaveDecayHFRatio = 1.30f;
+static const float kCaveRoomMb = -1000.0f;
+static const float kCaveReflectionsMb = -602.0f;
+static const float kCaveReflectionsDelay = 0.015f;
+static const float kCaveLateMb = -302.0f;
+static const float kCaveLateDelay = 0.022f;
+
+inline float
+OalSendDistanceGain(float dist, float ref, float maxDist)
+{
+	if(!(dist > ref))
+		return 1.0f;
+	float dry = OalInverseClampedGain(dist, ref, maxDist);
+	float decayDist = kCaveDecayTime * 343.3f;
+	return powf(0.001f, (dist - ref) / decayDist) * (1.0f - dry) + dry;
 }
 
 struct StereoGain

@@ -11,9 +11,10 @@ Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0)
 	}
 }
 
-Mixer::Mixer(Shared *shared) : mShared(shared)
+Mixer::Mixer(Shared *shared) : mShared(shared), mShelfLevel(-1.0f), mShelfRate(0.0f)
 {
 	memset(mVoice, 0, sizeof(mVoice));
+	memset(&mShelf, 0, sizeof(mShelf));
 }
 
 void
@@ -43,6 +44,12 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(!st.active)
 			mShared->readerSlot[c].store(-1, std::memory_order_release);
 	}
+	if(s.reverbLevel != mShelfLevel || outRate != mShelfRate){
+		HighShelf(mShelf, 5000.0f, outRate, s.reverbLevel);
+		mShelfLevel = s.reverbLevel;
+		mShelfRate = outRate;
+	}
+	RunBiquad(mShelf, send, frames);
 	mShared->latchedSerial.store(s.serial, std::memory_order_release);
 	mShared->activeVoices.store(active, std::memory_order_relaxed);
 }
