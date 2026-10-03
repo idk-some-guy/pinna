@@ -27,6 +27,9 @@ bool ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs)
 bool ShellWaitPrefilledForTest(uint8_t stream, int timeoutMs, double *waitedMs);
 int ShellOwnerForTest(void);
 void ShellClockTimeForTest(ClockTime *time);
+// With a test clock time set, a retry waits on that time and runs only from here.
+int ShellRunDueRetriesForTest(void);
+int ShellPendingRetriesForTest(void);
 Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
 uint32_t UserTrackProbesForTest(void);
 

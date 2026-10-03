@@ -61,6 +61,8 @@ static DeviceEntry sFakeList[kMaxDevices];
 static double sFakeRate[kMaxDevices];
 static int sFakeCount;
 static uint32_t sFakeDefault;
+struct FakeRetry { int64_t due; uint32_t session; };
+static std::vector<FakeRetry> sFakeRetries;
 #endif
 
 struct ReverbParam
@@ -602,6 +604,28 @@ OpenOutput(AudioObjectID dev)
 	return true;
 }
 
+static void Rebuild(int event, uint32_t eventId, const char *why);
+
+static void
+Retry(uint32_t session)
+{
+	if(session == sSession)
+		Rebuild(EVENT_RETRY, 0, "retry");
+}
+
+static void
+ScheduleRetry(void)
+{
+	uint32_t session = sSession;
+#ifdef CA_SHELL_OFFLINE
+	if(sClockTime){
+		sFakeRetries.push_back(FakeRetry{ sClockTime->Now() + (int64_t)NSEC_PER_SEC, session });
+		return;
+	}
+#endif
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{ Retry(session); });
+}
+
 static void
 Rebuild(int event, uint32_t eventId, const char *why)
 {
@@ -624,13 +648,8 @@ Rebuild(int event, uint32_t eventId, const char *why)
 	}
 	if(!ok)
 		OutputFormat(sRate, sBuffer, 0, "none");
-	if(!ok && c.id != kAudioObjectUnknown && event != EVENT_RETRY){
-		uint32_t session = sSession;
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{
-			if(session == sSession)
-				Rebuild(EVENT_RETRY, 0, "retry");
-		});
-	}
+	if(!ok && c.id != kAudioObjectUnknown && event != EVENT_RETRY)
+		ScheduleRetry();
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sFellBack = !FollowsDefault(sPinned) && (c.fellBack || !ok);
@@ -989,6 +1008,40 @@ void
 ShellClockTimeForTest(ClockTime *time)
 {
 	sClockTime = time;
+}
+
+int
+ShellRunDueRetriesForTest(void)
+{
+	__block int ran = 0;
+	EnsureControl();
+	dispatch_sync(sControl, ^{
+		int64_t now = sClockTime ? sClockTime->Now() : 0;
+		std::vector<FakeRetry> due;
+		for(size_t i = 0; i < sFakeRetries.size();)
+			if(sClockTime && sFakeRetries[i].due <= now){
+				due.push_back(sFakeRetries[i]);
+				sFakeRetries.erase(sFakeRetries.begin() + i);
+			}else
+				i++;
+		for(size_t i = 0; i < due.size(); i++)
+			Retry(due[i].session);
+		ran = (int)due.size();
+	});
+	return ran;
+}
+
+int
+ShellPendingRetriesForTest(void)
+{
+	__block int n = 0;
+	EnsureControl();
+	dispatch_sync(sControl, ^{
+		for(size_t i = 0; i < sFakeRetries.size(); i++)
+			if(sFakeRetries[i].session == sSession)
+				n++;
+	});
+	return n;
 }
 #endif
 
