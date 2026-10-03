@@ -415,6 +415,18 @@ OutputFormat(double rate, uint32_t buffer, uint32_t latency, const char *device)
 	sClock.SetFormat(rate, ClockBlock(buffer));
 }
 
+static void
+BufferSizeChanged(uint32_t buffer, uint32_t latency)
+{
+	{
+		std::lock_guard<std::mutex> lock(sInfoLock);
+		sBuffer = buffer;
+	}
+	if(sShared)
+		sShared->streamLatency.store(latency, std::memory_order_relaxed);
+	sClock.SetFormat(sRate, ClockBlock(buffer));
+}
+
 static uint32_t
 DeviceLatency(AudioObjectID dev)
 {
@@ -482,16 +494,8 @@ DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 		}
 	if(buffer && !gone && !format && dev == sCurrent){
 		UInt32 frames = 0, size = sizeof(frames);
-		if(AudioObjectGetPropertyData(dev, &kDeviceProps[4], 0, NULL, &size, &frames) == noErr && frames){
-			char name[128];
-			double rate;
-			{
-				std::lock_guard<std::mutex> lock(sInfoLock);
-				strlcpy(name, sDeviceName, sizeof(name));
-				rate = sRate;
-			}
-			OutputFormat(rate, frames, 2 * frames + DeviceLatency(dev), name);
-		}
+		if(AudioObjectGetPropertyData(dev, &kDeviceProps[4], 0, NULL, &size, &frames) == noErr && frames)
+			BufferSizeChanged(frames, 2 * frames + DeviceLatency(dev));
 	}
 	if(!gone && !format)
 		return;
@@ -912,6 +916,12 @@ ShellPostEventForTest(int event, uint32_t id)
 {
 	static const char *const why[] = { "default output changed", "rate changed", "device lost", "devices changed", "wake", "device chosen", "start", "retry" };
 	dispatch_sync(sControl, ^{ Rebuild(event, id, why[event]); });
+}
+
+void
+ShellBufferEventForTest(uint32_t frames)
+{
+	dispatch_sync(sControl, ^{ BufferSizeChanged(frames, 2 * frames); });
 }
 
 void

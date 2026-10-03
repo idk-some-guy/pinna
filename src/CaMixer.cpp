@@ -65,8 +65,11 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 			bool ended = RenderVoice(st, sn, outRate, dryL + done, dryR + done, mVoiceSend, n);
 			if(sending){
 				RunBiquad(shelf, mVoiceSend, n);
-				for(uint32_t i = 0; i < n; i++)
-					send[done + i] += mVoiceSend[i];
+				if(isfinite(shelf.z1) && isfinite(shelf.z2))
+					for(uint32_t i = 0; i < n; i++)
+						send[done + i] += mVoiceSend[i];
+				else
+					shelf.z1 = shelf.z2 = 0.0f;
 			}
 			if(ended)
 				mShared->finishedId[c].store(st.playId, std::memory_order_release);

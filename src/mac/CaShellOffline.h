@@ -20,6 +20,7 @@ void ShellFailPullsForTest(void);
 void ShellFailSpatialOnceForTest(void);
 void ShellFakeDevicesForTest(const DeviceEntry *list, const double *rates, int count, uint32_t defaultId);
 void ShellPostEventForTest(int event, uint32_t id);
+void ShellBufferEventForTest(uint32_t frames);
 void ShellWaitControlForTest(void);
 bool ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames);
 uint64_t ShellFramesForTest(void);

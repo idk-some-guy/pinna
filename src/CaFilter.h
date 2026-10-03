@@ -15,6 +15,8 @@ inline void
 HighShelf(Biquad &b, float f0, float rate, float gain)
 {
 	float A = gain < 0.001f ? 0.001f : gain;
+	if(f0 > 0.49f * rate)
+		f0 = 0.49f * rate;
 	float w0 = 2.0f * 3.14159265f * f0 / rate;
 	float cw = cosf(w0), sw = sinf(w0);
 	float alpha = sw / 2.0f * sqrtf(2.0f);
