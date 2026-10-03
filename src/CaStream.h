@@ -196,12 +196,12 @@ private:
 	DecoderFactory mFactory;
 	Slot mSlot[kStreams];
 	std::deque<StreamCommand> mQueue;
-	std::atomic<bool> mPending;
+	std::atomic<bool> mPending, mQuit;
 	std::atomic<uint32_t> mWakes;
 	std::mutex mMutex;
 	std::condition_variable mCv, mDoneCv;
 	std::thread mThread;
-	bool mQuit, mStarved;
+	bool mStarved;
 };
 
 }

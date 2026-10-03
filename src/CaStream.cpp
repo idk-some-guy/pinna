@@ -312,7 +312,7 @@ StreamReader::render(const StreamSnap &p, ChunkRing &ring, StreamStatus &st, std
 }
 
 StreamWorker::StreamWorker(ChunkRing *rings, StreamStatus *status, DecoderFactory factory, bool threaded)
-	: mRings(rings), mStatus(status), mFactory(factory), mPending(false), mWakes(0), mQuit(false), mStarved(false)
+	: mRings(rings), mStatus(status), mFactory(factory), mPending(false), mQuit(false), mWakes(0), mStarved(false)
 {
 	memset(mSlot, 0, sizeof(mSlot));
 	if(threaded)
@@ -323,7 +323,7 @@ StreamWorker::~StreamWorker(void)
 {
 	{
 		std::lock_guard<std::mutex> lock(mMutex);
-		mQuit = true;
+		mQuit.store(true, std::memory_order_release);
 	}
 	mCv.notify_all();
 	if(mThread.joinable())
@@ -418,7 +418,7 @@ StreamWorker::fill(int index)
 	uint32_t target = (s.rate * 3 / 2 + kChunkFrames - 1) / kChunkFrames;
 	if(target > (uint32_t)kRingChunks)
 		target = kRingChunks;
-	while(!s.done && !mPending.load(std::memory_order_acquire)){
+	while(!s.done && !mPending.load(std::memory_order_acquire) && !mQuit.load(std::memory_order_acquire)){
 		if(!s.ending && ring.filledSince(s.mark) >= target)
 			break;
 		Chunk *c = ring.beginWrite();

@@ -63,6 +63,7 @@ static int sFakeCount;
 static uint32_t sFakeDefault;
 struct FakeRetry { int64_t due; uint32_t session; };
 static std::vector<FakeRetry> sFakeRetries;
+static bool sFailSpatialOnce;
 #endif
 
 struct ReverbParam
@@ -153,6 +154,12 @@ FeedStereo(void *ref, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt
 static bool
 SetupSpatial(double rate)
 {
+#ifdef CA_SHELL_OFFLINE
+	if(sFailSpatialOnce){
+		sFailSpatialOnce = false;
+		return false;
+	}
+#endif
 	sSpatial = MakeUnit(kAudioUnitType_Mixer, kAudioUnitSubType_SpatialMixer);
 	if(sSpatial == NULL)
 		return false;
@@ -877,6 +884,12 @@ ShellFailPullsForTest(void)
 {
 	if(sSpatial)
 		AudioUnitUninitialize(sSpatial);
+}
+
+void
+ShellFailSpatialOnceForTest(void)
+{
+	sFailSpatialOnce = true;
 }
 
 void

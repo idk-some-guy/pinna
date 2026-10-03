@@ -17,6 +17,7 @@ void ShellRenderOffline(float *L, float *R, uint32_t frames);
 bool ShellPassThroughTest(const float *inL, const float *inR, float *outL, float *outR, uint32_t frames);
 bool ShellRebuildOfflineForTest(double rate);
 void ShellFailPullsForTest(void);
+void ShellFailSpatialOnceForTest(void);
 void ShellFakeDevicesForTest(const DeviceEntry *list, const double *rates, int count, uint32_t defaultId);
 void ShellPostEventForTest(int event, uint32_t id);
 void ShellWaitControlForTest(void);
