@@ -35,6 +35,7 @@ ShellInfo ShellGetInfo(void);
 int32_t ShellOutputType(void);
 void ShellSetDevice(const char *uid);
 void ShellSetSpatial(bool on);
+void ShellSetAlgorithm(int32_t algorithm);
 int ShellDeviceCount(void);
 bool ShellDeviceAt(int index, char *name, size_t nameSize, char *uid, size_t uidSize);
 uint32_t ShellDeviceListGeneration(void);

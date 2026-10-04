@@ -41,6 +41,8 @@ static_assert(kSpatialUseOutputType == 0 && kSpatialHRTFHQ == 1, "algorithm name
 static const char *const kOutputNames[NUM_OUTPUTS] = { "auto", "headphones", "builtin", "external", "multichannel" };
 static const char *const kOutputMenuLabels[NUM_OUTPUTS] = { "AUTO (NOT USED YET)", "HEADPHONES (NOT USED YET)", "BUILT-IN (NOT USED YET)",
 	"EXTERNAL (NOT USED YET)", "MULTICHANNEL (NOT USED YET)" };
+static const char *const kOutputMenuLabelsSpatial[NUM_OUTPUTS] = { "AUTO (NEXT START)", "HEADPHONES (NEXT START)", "BUILT-IN (NEXT START)",
+	"EXTERNAL (NEXT START)", "MULTICHANNEL (NEXT START)" };
 
 inline void
 PrefsDefaults(AudioEnginePrefs &p)
@@ -103,17 +105,35 @@ OutputTypeFromName(const char *s, int32_t fallback)
 	return fallback;
 }
 
-inline const char *
-OutputTypeMenuLabel(int32_t t)
-{
-	return t >= 0 && t < NUM_OUTPUTS ? kOutputMenuLabels[t] : kOutputMenuLabels[OUTPUT_AUTO];
-}
 
 inline int32_t
 ResolveMode(int32_t requested, bool *fellBack)
 {
 	*fellBack = requested != MODE_CLASSIC && requested != MODE_SPATIAL;
 	return requested == MODE_SPATIAL || requested == MODE_REIMAGINED ? MODE_SPATIAL : MODE_CLASSIC;
+}
+
+inline const char *
+OutputTypeMenuLabel(int32_t t, int32_t storedMode = gAudioEnginePrefs.mode)
+{
+	bool fellBack;
+	const char *const *labels = ResolveMode(storedMode, &fellBack) == MODE_SPATIAL ? kOutputMenuLabelsSpatial : kOutputMenuLabels;
+	return labels[t >= 0 && t < NUM_OUTPUTS ? t : OUTPUT_AUTO];
+}
+
+inline const char *
+HrtfReadingName(int32_t v)
+{
+	return v < 0 ? "not read" : v ? "on" : "off";
+}
+
+inline void
+FormatEngineState(char *out, size_t size, int32_t mode, int32_t algorithm, int32_t outputType, bool unitUnavailable, int32_t hrtfAtStart,
+	int32_t hrtfAfterSecond)
+{
+	const char *unit = !OutputRoutesSpatial(outputType) ? "not built (speakers)" : unitUnavailable ? "unavailable" : "available";
+	snprintf(out, size, "audio state: mode %s, algorithm %s, output %s, spatial unit %s, personalised HRTF %s at start and %s after 1 s",
+		ModeName(mode), AlgorithmName(algorithm), OutputTypeName(outputType), unit, HrtfReadingName(hrtfAtStart), HrtfReadingName(hrtfAfterSecond));
 }
 
 inline int32_t

@@ -16,6 +16,7 @@
 #endif
 #include "CaRules.h"
 #include "CaDevice.h"
+#include "CaPrefs.h"
 #include "CaDrive.h"
 #include "CaClock.h"
 #include "OalPanTable.h"
@@ -471,13 +472,25 @@ ReadDeviceName(AudioObjectID dev, char *out, size_t size)
 	}
 }
 
-static uint32_t
-ReadUInt32(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObjectPropertyScope scope)
+static int
+ReadUInt32Checked(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObjectPropertyScope scope, uint32_t *out)
 {
 	AudioObjectPropertyAddress a = { sel, scope, kAudioObjectPropertyElementMain };
 	UInt32 v = 0, size = sizeof(v);
-	if(!AudioObjectHasProperty(obj, &a) || AudioObjectGetPropertyData(obj, &a, 0, NULL, &size, &v) != noErr)
+	*out = 0;
+	if(!AudioObjectHasProperty(obj, &a))
 		return 0;
+	if(AudioObjectGetPropertyData(obj, &a, 0, NULL, &size, &v) != noErr)
+		return -1;
+	*out = v;
+	return 1;
+}
+
+static uint32_t
+ReadUInt32(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObjectPropertyScope scope)
+{
+	uint32_t v;
+	ReadUInt32Checked(obj, sel, scope, &v);
 	return v;
 }
 
@@ -782,6 +795,88 @@ ArmHrtfReading(void)
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{ CheckHrtfLater(session, readings); });
 }
 
+struct DeviceReadout
+{
+	uint32_t transport, dataSource;
+	int transportRead, dataSourceRead, streamsRead, streams;
+	uint32_t terminal[16];
+	int terminalRead[16];
+};
+
+static void
+ReadReadout(AudioObjectID dev, DeviceReadout &r)
+{
+#ifdef CA_SHELL_OFFLINE
+	if(sFake){
+		for(int i = 0; i < sFakeCount; i++)
+			if(sFakeList[i].id == dev){
+				r.transport = sFakeList[i].transport;
+				r.transportRead = 1;
+				r.dataSource = sFakeList[i].dataSource;
+				r.dataSourceRead = r.dataSource != 0;
+				r.terminal[0] = sFakeList[i].terminal;
+				r.terminalRead[0] = 1;
+				r.streams = 1;
+				r.streamsRead = 1;
+			}
+		return;
+	}
+#endif
+	r.transportRead = ReadUInt32Checked(dev, kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, &r.transport);
+	r.dataSourceRead = ReadUInt32Checked(dev, kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeOutput, &r.dataSource);
+	AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+	AudioStreamID ids[16];
+	UInt32 size = sizeof(ids);
+	r.streamsRead = AudioObjectGetPropertyData(dev, &sa, 0, NULL, &size, ids) == noErr ? 1 : -1;
+	for(UInt32 i = 0; r.streamsRead > 0 && i < size / sizeof(AudioStreamID) && i < 16; i++, r.streams++)
+		r.terminalRead[r.streams] = ReadUInt32Checked(ids[i], kAudioStreamPropertyTerminalType, kAudioObjectPropertyScopeGlobal, &r.terminal[r.streams]);
+}
+
+static void
+CodeText(char *out, size_t size, uint32_t v, int read)
+{
+	if(read < 0){
+		strlcpy(out, "failed", size);
+		return;
+	}
+	if(read == 0){
+		strlcpy(out, "none", size);
+		return;
+	}
+	char c[5] = { (char)(v >> 24), (char)(v >> 16), (char)(v >> 8), (char)v, 0 };
+	bool text = c[0] > ' ' && c[0] < 127;
+	for(int i = 1; i < 4; i++)
+		text = text && c[i] >= ' ' && c[i] < 127;
+	if(!text){
+		snprintf(out, size, v ? "0x%x" : "%u", v);
+		return;
+	}
+	for(int i = 3; i > 0 && c[i] == ' '; i--)
+		c[i] = 0;
+	strlcpy(out, c, size);
+}
+
+static void
+LogDevice(AudioObjectID dev, const char *name)
+{
+	DeviceReadout r;
+	memset(&r, 0, sizeof(r));
+	ReadReadout(dev, r);
+	char transport[16], source[16], terminals[16 * 12] = "", code[16];
+	CodeText(transport, sizeof(transport), r.transport, r.transportRead);
+	CodeText(source, sizeof(source), r.dataSource, r.dataSourceRead);
+	if(r.streamsRead < 0 || r.streams == 0)
+		strlcpy(terminals, r.streamsRead < 0 ? "failed" : "none", sizeof(terminals));
+	for(int i = 0; i < r.streams; i++){
+		CodeText(code, sizeof(code), r.terminal[i], r.terminalRead[i]);
+		if(i > 0)
+			strlcat(terminals, " ", sizeof(terminals));
+		strlcat(terminals, code, sizeof(terminals));
+	}
+	printf("sampman_ca: device \"%s\" transport %s, terminals %s, data source %s, channels %u, output %s\n", name, transport, terminals, source,
+		CurrentChannels(dev), OutputTypeName(sOutputType.load(std::memory_order_relaxed)));
+}
+
 static void
 ResolveOutputType(AudioObjectID dev)
 {
@@ -799,6 +894,7 @@ OpenOutput(AudioObjectID dev)
 	char name[128];
 	ReadDeviceName(dev, name, sizeof(name));
 	ResolveOutputType(dev);
+	LogDevice(dev, name);
 #ifdef CA_SHELL_OFFLINE
 	if(sFake){
 		double rate = 0.0;
@@ -1047,6 +1143,19 @@ ShellSetSpatial(bool on)
 			return;
 		sSpatialWanted = on;
 		ArmHrtfReading();
+	});
+}
+
+void
+ShellSetAlgorithm(int32_t algorithm)
+{
+	if(sControl == nil)
+		return;
+	dispatch_async(sControl, ^{
+		if(sStopping || sSpatialAlgorithm == algorithm)
+			return;
+		sSpatialAlgorithm = algorithm;
+		Rebuild(EVENT_PIN, 0, "spatial algorithm changed");
 	});
 }
 
