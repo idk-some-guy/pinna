@@ -18,15 +18,26 @@
 #include "CaDevice.h"
 #include "CaDrive.h"
 #include "CaClock.h"
+#include "OalPanTable.h"
 
 namespace ca {
 
-enum { kMaxDevices = 32 };
+enum { kMaxDevices = 32, kSpatial3DInputs = 53, kBypassInput = 52, kSpatialPullFailLimit = 8 };
 
 static Shared *sShared;
 static Mixer *sMixer;
-static AudioUnit sOutput, sSpatial, sReverb;
-static bool sSpatialBypass;
+static AudioUnit sOutput, sSpatial, sReverb, sSpatial3D;
+static bool sSpatialBypass, sSpatial3DUnavailable;
+static SpatialRender sSpatialRender = { kSpatialUseOutputType };
+static int32_t sSpatialAlgorithm = kSpatialUseOutputType;
+static UInt32 sSpatialOutputType = kSpatialMixerOutputType_Headphones;
+static float sSetAz[kChannels], sSetEl[kChannels];
+static float sSilence[kMaxBlock];
+static std::atomic<uint64_t> sSpatialFrames;
+static std::atomic<bool> sSpatialFailed;
+static uint32_t sFailedPulls;
+static int32_t sHrtfStart = -1, sHrtfLater = -1;
+static uint32_t sHrtfReadings, sHrtfArms;
 static double sRate;
 static uint32_t sBuffer;
 static uint32_t sRebuilds;
@@ -35,12 +46,15 @@ static char sDeviceName[128];
 static float sDryL[kMaxBlock], sDryR[kMaxBlock], sSend[kMaxBlock], sStrL[kMaxBlock], sStrR[kMaxBlock];
 static float sWetL[kMaxBlock], sWetR[kMaxBlock];
 static const float *sFeed[2] = { sDryL, sDryR };
+static const float *sFeed3D[2] = { sDryL, sDryR };
+static UInt32 sChunkAt;
+static float sSpatialCalib = kSpatialCalibHeadphones;
 static const float *sSendFeed[2] = { sSend, sSend };
 
 static Drive sDrive;
 static Clock sClock;
 static dispatch_queue_t sControl;
-static bool sStopping;
+static bool sStopping, sSpatialWanted;
 static std::mutex sInfoLock;
 static DeviceEntry sDevices[kMaxDevices];
 static int sNumDevices;
@@ -63,7 +77,10 @@ static int sFakeCount;
 static uint32_t sFakeDefault;
 struct FakeRetry { int64_t due; uint32_t session; };
 static std::vector<FakeRetry> sFakeRetries;
-static bool sFailSpatialOnce;
+static bool sFailSpatialOnce, sFailSpatial3DOnce;
+static std::atomic<uint32_t> sFailSpatial3DPulls;
+static ClockTapFn sClockTap;
+static void *sClockTapCtx;
 #endif
 
 struct ReverbParam
@@ -106,7 +123,7 @@ struct FlushDenormals
 };
 
 static AudioStreamBasicDescription
-StereoFormat(double rate)
+StereoFormat(double rate, UInt32 channels = 2)
 {
 	AudioStreamBasicDescription f;
 	memset(&f, 0, sizeof(f));
@@ -116,7 +133,7 @@ StereoFormat(double rate)
 	f.mBytesPerPacket = 4;
 	f.mFramesPerPacket = 1;
 	f.mBytesPerFrame = 4;
-	f.mChannelsPerFrame = 2;
+	f.mChannelsPerFrame = channels;
 	f.mBitsPerChannel = 32;
 	return f;
 }
@@ -151,6 +168,14 @@ FeedStereo(void *ref, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt
 	return noErr;
 }
 
+static OSStatus
+FeedMono(void *ref, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 frames, AudioBufferList *io)
+{
+	intptr_t c = (intptr_t)ref;
+	memcpy(io->mBuffers[0].mData, c < kChannels ? sMixer->mono((int)c) + sChunkAt : sSilence, frames * sizeof(float));
+	return noErr;
+}
+
 static bool
 SetupSpatial(double rate)
 {
@@ -179,6 +204,70 @@ SetupSpatial(double rate)
 	return ok;
 }
 
+static bool
+SetupSpatial3D(double rate, int32_t algorithm, UInt32 outputType)
+{
+#ifdef CA_SHELL_OFFLINE
+	if(sFailSpatial3DOnce){
+		sFailSpatial3DOnce = false;
+		return false;
+	}
+	UInt32 hrtf = kSpatialMixerPersonalizedHRTFMode_Off;
+#else
+	UInt32 hrtf = kSpatialMixerPersonalizedHRTFMode_Auto;
+#endif
+	sSpatial3D = MakeUnit(kAudioUnitType_Mixer, kAudioUnitSubType_SpatialMixer);
+	if(sSpatial3D == NULL)
+		return false;
+	UInt32 inputs = kSpatial3DInputs, maxFrames = kMaxBlock, bypass = kSpatialMixerSourceMode_Bypass, noFlags = 0, off = 0;
+	UInt32 flags = kSpatialMixerRenderingFlags_InterAuralDelay;
+	UInt32 alg = algorithm == kSpatialHRTFHQ ? kSpatializationAlgorithm_HRTFHQ : kSpatializationAlgorithm_UseOutputType;
+	AudioStreamBasicDescription stereo = StereoFormat(rate), mono = StereoFormat(rate, 1);
+	bool ok = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_ElementCount, kAudioUnitScope_Input, 0, &inputs, sizeof(inputs)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof(maxFrames)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &stereo, sizeof(stereo)) == noErr;
+	for(UInt32 b = 0; ok && b < kBypassInput; b++){
+		AURenderCallbackStruct cb = { FeedMono, (void *)(intptr_t)b };
+		ok = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, b, &mono, sizeof(mono)) == noErr;
+		ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatializationAlgorithm, kAudioUnitScope_Input, b, &alg, sizeof(alg)) == noErr;
+		ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerRenderingFlags, kAudioUnitScope_Input, b, &flags, sizeof(flags)) == noErr;
+		ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, b, &cb, sizeof(cb)) == noErr;
+	}
+	AURenderCallbackStruct cb = { FeedStereo, (void *)sFeed3D };
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, kBypassInput, &stereo, sizeof(stereo)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerSourceMode, kAudioUnitScope_Input, kBypassInput, &bypass, sizeof(bypass)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerRenderingFlags, kAudioUnitScope_Input, kBypassInput, &noFlags, sizeof(noFlags)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, kBypassInput, &cb, sizeof(cb)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerOutputType, kAudioUnitScope_Global, 0, &outputType, sizeof(outputType)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_UsesInternalReverb, kAudioUnitScope_Global, 0, &off, sizeof(off)) == noErr;
+	if(ok)
+		AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerPersonalizedHRTFMode, kAudioUnitScope_Global, 0, &hrtf, sizeof(hrtf));
+	ok = ok && AudioUnitInitialize(sSpatial3D) == noErr;
+	for(UInt32 b = 0; ok && b < kBypassInput; b++){
+		ok = AudioUnitSetParameter(sSpatial3D, kSpatialMixerParam_Distance, kAudioUnitScope_Input, b, 1.0f, 0) == noErr;
+		ok = ok && AudioUnitSetParameter(sSpatial3D, kSpatialMixerParam_ReverbBlend, kAudioUnitScope_Input, b, 0.0f, 0) == noErr;
+	}
+	if(!ok){
+		DisposeUnit(&sSpatial3D);
+		return false;
+	}
+	sSpatialRender.algorithm = algorithm;
+	sSpatialCalib = outputType == kSpatialMixerOutputType_BuiltInSpeakers ? kSpatialCalibBuiltInSpeakers : kSpatialCalibHeadphones;
+	sFailedPulls = 0;
+	for(int c = 0; c < kChannels; c++)
+		sSetAz[c] = sSetEl[c] = NAN;
+	return true;
+}
+
+static int32_t
+ReadPersonalizedHrtf(void)
+{
+	UInt32 v = 0, size = sizeof(v);
+	if(sSpatial3D == NULL || AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerAnyInputIsUsingPersonalizedHRTF, kAudioUnitScope_Global, 0, &v, &size) != noErr)
+		return -1;
+	return (int32_t)v;
+}
+
 static void
 SetupReverb(double rate)
 {
@@ -205,11 +294,11 @@ SetupReverb(double rate)
 }
 
 static bool
-PullStereo(AudioUnit u, float *L, float *R, UInt32 frames)
+PullStereo(AudioUnit u, float *L, float *R, UInt32 frames, UInt32 at = 0)
 {
 	AudioTimeStamp ts;
 	memset(&ts, 0, sizeof(ts));
-	ts.mSampleTime = sSampleTime;
+	ts.mSampleTime = sSampleTime + at;
 	ts.mFlags = kAudioTimeStampSampleTimeValid;
 	struct { AudioBufferList list; AudioBuffer second; } abl;
 	abl.list.mNumberBuffers = 2;
@@ -232,13 +321,63 @@ CountUnderrun(void)
 static void
 RenderBlock(float *L, float *R, UInt32 frames)
 {
-	sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, frames, (float)sRate);
-	bool spatial = !sSpatialBypass && sSpatial != NULL;
-	if(!spatial || !PullStereo(sSpatial, L, R, frames)){
-		if(spatial)
+	bool spatial = sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, frames, (float)sRate, sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? &sSpatialRender : NULL);
+	if(spatial){
+		UInt32 chunk = SpatialChunkFrames((float)sRate);
+		bool failed = false;
+		for(uint32_t k = 0; k < sMixer->chunks(); k++){
+			UInt32 at = k * chunk, n = frames - at < chunk ? frames - at : chunk;
+			for(int c = 0; c < kChannels; c++){
+				Direction d = sMixer->direction(c, k);
+				if(d.azimuth != sSetAz[c]){
+					AudioUnitSetParameter(sSpatial3D, kSpatialMixerParam_Azimuth, kAudioUnitScope_Input, c, d.azimuth, 0);
+					sSetAz[c] = d.azimuth;
+				}
+				if(d.elevation != sSetEl[c]){
+					AudioUnitSetParameter(sSpatial3D, kSpatialMixerParam_Elevation, kAudioUnitScope_Input, c, d.elevation, 0);
+					sSetEl[c] = d.elevation;
+				}
+			}
+			sChunkAt = at;
+			sFeed3D[0] = sDryL + at;
+			sFeed3D[1] = sDryR + at;
+			bool pulled = true;
+#ifdef CA_SHELL_OFFLINE
+			if(sFailSpatial3DPulls.load(std::memory_order_relaxed)){
+				sFailSpatial3DPulls.fetch_sub(1, std::memory_order_relaxed);
+				pulled = false;
+			}
+#endif
+			if(!pulled || !PullStereo(sSpatial3D, L + at, R + at, n, at)){
+				failed = true;
+				memcpy(L + at, sDryL + at, n * sizeof(float));
+				memcpy(R + at, sDryR + at, n * sizeof(float));
+				float gl = kOalPanCentre[0] / sSpatialCalib, gr = kOalPanCentre[1] / sSpatialCalib;
+				for(int c = 0; c < kChannels; c++){
+					const float *m = sMixer->mono(c) + at;
+					for(UInt32 i = 0; i < n; i++){
+						L[at + i] += m[i] * gl;
+						R[at + i] += m[i] * gr;
+					}
+				}
+			}
+		}
+		sChunkAt = 0;
+		if(failed){
 			CountUnderrun();
-		memcpy(L, sDryL, frames * sizeof(float));
-		memcpy(R, sDryR, frames * sizeof(float));
+			if(++sFailedPulls >= kSpatialPullFailLimit)
+				sSpatialFailed.store(true, std::memory_order_relaxed);
+		}else
+			sFailedPulls = 0;
+		sSpatialFrames.fetch_add(frames, std::memory_order_relaxed);
+	}else{
+		AudioUnit mix = sSpatialBypass ? NULL : sSpatial;
+		if(mix == NULL || !PullStereo(mix, L, R, frames)){
+			if(mix)
+				CountUnderrun();
+			memcpy(L, sDryL, frames * sizeof(float));
+			memcpy(R, sDryR, frames * sizeof(float));
+		}
 	}
 	if(sReverb){
 		if(PullStereo(sReverb, sWetL, sWetR, frames))
@@ -286,6 +425,10 @@ ClockRender(void *, uint32_t frames, double rate)
 	for(uint32_t done = 0; done < frames;){
 		uint32_t n = frames - done < (uint32_t)kMaxBlock ? frames - done : (uint32_t)kMaxBlock;
 		sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, n, (float)rate);
+#ifdef CA_SHELL_OFFLINE
+		if(sClockTap)
+			sClockTap(sClockTapCtx, sDryL, sDryR, sSend, sStrL, sStrR, n, rate);
+#endif
 		done += n;
 	}
 }
@@ -543,6 +686,7 @@ StopOutput(void)
 	UnwatchDevice(sCurrent);
 	DisposeUnit(&sOutput);
 	DisposeUnit(&sSpatial);
+	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
 	sCurrent = kAudioObjectUnknown;
 }
@@ -558,8 +702,54 @@ SetupSpatialOrBypass(double rate)
 	}
 	if(bypass)
 		printf("sampman_ca: spatial mixer unavailable, classic stereo bypasses it\n");
+	DisposeUnit(&sSpatial3D);
+	bool unavailable = !SetupSpatial3D(rate, sSpatialAlgorithm, sSpatialOutputType);
+	sSpatialFrames.store(0, std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lock(sInfoLock);
+		sSpatial3DUnavailable = unavailable;
+	}
+	if(unavailable)
+		printf("sampman_ca: spatial mixer for positioned voices unavailable, spatial mode uses classic routing\n");
 	SetupReverb(rate);
 	return true;
+}
+
+static void
+CheckHrtfLater(uint32_t session, uint32_t readings)
+{
+	if(sStopping || session != sSession || !sSpatialWanted)
+		return;
+	{
+		std::lock_guard<std::mutex> lock(sInfoLock);
+		if(readings != sHrtfReadings)
+			return;
+	}
+	if(sSpatial3D && sSpatialFrames.load(std::memory_order_relaxed) >= (uint64_t)sRate){
+		int32_t v = ReadPersonalizedHrtf();
+		std::lock_guard<std::mutex> lock(sInfoLock);
+		sHrtfLater = v;
+		sHrtfReadings++;
+		return;
+	}
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{ CheckHrtfLater(session, readings); });
+}
+
+static void
+ArmHrtfReading(void)
+{
+	if(!sSpatialWanted || sSpatial3D == NULL || sCurrent == kAudioObjectUnknown)
+		return;
+	int32_t hrtf = ReadPersonalizedHrtf();
+	uint32_t session = sSession, readings;
+	{
+		std::lock_guard<std::mutex> lock(sInfoLock);
+		sHrtfStart = hrtf;
+		sHrtfLater = -1;
+		readings = ++sHrtfReadings;
+		sHrtfArms++;
+	}
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{ CheckHrtfLater(session, readings); });
 }
 
 static bool
@@ -580,6 +770,7 @@ OpenOutput(AudioObjectID dev)
 		sCurrent = dev;
 		sChannels = CurrentChannels(dev);
 		sDrive.Arm();
+		ArmHrtfReading();
 		return true;
 	}
 #endif
@@ -612,6 +803,7 @@ OpenOutput(AudioObjectID dev)
 		return false;
 	}
 	WatchDevice(dev);
+	ArmHrtfReading();
 	return true;
 }
 
@@ -747,6 +939,7 @@ ShellStart(Shared *shared, const char *deviceUid)
 	sShared = shared;
 	sMixer = new Mixer(shared);
 	sSampleTime = 0;
+	sSpatialFailed.store(false, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sRebuilds = 0;
@@ -762,6 +955,7 @@ ShellStart(Shared *shared, const char *deviceUid)
 	const char *pin = deviceUid && deviceUid[0] ? deviceUid : "default";
 	dispatch_sync(sControl, ^{
 		sStopping = false;
+		sSpatialWanted = false;
 		sSession++;
 		strlcpy(sPinned, pin, sizeof(sPinned));
 		WatchSystem();
@@ -789,10 +983,24 @@ ShellStop(void)
 		AudioOutputUnitStop(sOutput);
 	DisposeUnit(&sOutput);
 	DisposeUnit(&sSpatial);
+	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
 	delete sMixer;
 	sMixer = NULL;
 	sShared = NULL;
+}
+
+void
+ShellSetSpatial(bool on)
+{
+	if(sControl == nil)
+		return;
+	dispatch_async(sControl, ^{
+		if(sStopping || sSpatialWanted == on)
+			return;
+		sSpatialWanted = on;
+		ArmHrtfReading();
+	});
 }
 
 void
@@ -844,6 +1052,7 @@ ShellStartOffline(Shared *shared, double rate)
 	sShared = shared;
 	sMixer = new Mixer(shared);
 	sSampleTime = 0;
+	sSpatialFailed.store(false, std::memory_order_relaxed);
 	OutputFormat(rate, 512, 0, "offline");
 	return SetupSpatialOrBypass(rate);
 }
@@ -875,6 +1084,7 @@ bool
 ShellRebuildOfflineForTest(double rate)
 {
 	DisposeUnit(&sSpatial);
+	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
 	SetupSpatialOrBypass(rate);
 	OutputFormat(rate, sBuffer, 0, "offline");
@@ -884,16 +1094,28 @@ ShellRebuildOfflineForTest(double rate)
 }
 
 void
-ShellFailPullsForTest(void)
+ShellFailPullsForTest(int unit, uint32_t blocks)
 {
-	if(sSpatial)
+	if(unit == 1)
+		sFailSpatial3DPulls.store(blocks, std::memory_order_relaxed);
+	else if(sSpatial)
 		AudioUnitUninitialize(sSpatial);
 }
 
 void
-ShellFailSpatialOnceForTest(void)
+ShellFailSpatialOnceForTest(int unit)
 {
-	sFailSpatialOnce = true;
+	if(unit == 1)
+		sFailSpatial3DOnce = true;
+	else
+		sFailSpatialOnce = true;
+}
+
+void
+ShellClockTapForTest(ClockTapFn tap, void *ctx)
+{
+	sClockTap = tap;
+	sClockTapCtx = ctx;
 }
 
 void
@@ -945,6 +1167,13 @@ ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames)
 	AudioUnitRenderActionFlags flags = 0;
 	OutputRender(NULL, &flags, NULL, 0, frames, &abl.list);
 	return sDrive.UnitBeats() != beats;
+}
+
+uint32_t
+ShellHrtfArmsForTest(void)
+{
+	std::lock_guard<std::mutex> lock(sInfoLock);
+	return sHrtfArms;
 }
 
 uint64_t
@@ -1078,6 +1307,10 @@ ShellGetInfo(void)
 	i.rebuilds = sRebuilds;
 	i.stalls = sClock.Stalls();
 	i.spatialBypassed = sSpatialBypass;
+	i.spatialUnavailable = sSpatial3DUnavailable || sSpatialFailed.load(std::memory_order_relaxed);
+	i.hrtfAtStart = sHrtfStart;
+	i.hrtfAfterSecond = sHrtfLater;
+	i.hrtfReadings = sHrtfReadings;
 	i.fellBack = sFellBack;
 	strncpy(i.device, sDeviceName, sizeof(i.device) - 1);
 	i.device[sizeof(i.device) - 1] = '\0';

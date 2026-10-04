@@ -16,8 +16,12 @@ bool ShellStartOffline(Shared *shared, double rate);
 void ShellRenderOffline(float *L, float *R, uint32_t frames);
 bool ShellPassThroughTest(const float *inL, const float *inR, float *outL, float *outR, uint32_t frames);
 bool ShellRebuildOfflineForTest(double rate);
-void ShellFailPullsForTest(void);
-void ShellFailSpatialOnceForTest(void);
+// Unit 1 fails the next blocks pulls of the spatial unit for positioned voices.
+void ShellFailPullsForTest(int unit = 0, uint32_t blocks = 0);
+void ShellFailSpatialOnceForTest(int unit = 0);
+typedef void (*ClockTapFn)(void *ctx, const float *dryL, const float *dryR, const float *send, const float *strL, const float *strR, uint32_t frames, double rate);
+// Set only while the clock is stopped or asleep on a test clock time.
+void ShellClockTapForTest(ClockTapFn tap, void *ctx);
 void ShellFakeDevicesForTest(const DeviceEntry *list, const double *rates, int count, uint32_t defaultId);
 void ShellPostEventForTest(int event, uint32_t id);
 void ShellBufferEventForTest(uint32_t frames);
@@ -34,5 +38,6 @@ int ShellRunDueRetriesForTest(void);
 int ShellPendingRetriesForTest(void);
 Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
 uint32_t UserTrackProbesForTest(void);
+uint32_t ShellHrtfArmsForTest(void);
 
 }

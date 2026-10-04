@@ -18,6 +18,8 @@ struct VoiceSnap
 	int8_t poolSlot;
 	float sendHF;
 	uint32_t baseRate;
+	float azimuth, elevation, monoGain;
+	uint8_t routeBypass;
 };
 
 struct VoiceState

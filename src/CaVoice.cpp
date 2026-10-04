@@ -138,7 +138,8 @@ RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, flo
 		if(st.fadeLeft){
 			uint32_t k = kOalFadeFrames - st.fadeLeft--;
 			accL[n] += st.fade[0][k];
-			accR[n] += st.fade[1][k];
+			if(accR)
+				accR[n] += st.fade[1][k];
 			accSend[n] += st.fade[2][k];
 		}
 		if(!st.active){
@@ -177,7 +178,8 @@ RenderVoice(VoiceState &st, const VoiceSnap &sn, float outRate, float *accL, flo
 				s += Fetch(sn, lp, st.wrapped, i + first + k) * w[k];
 		}
 		accL[n] += s * gl;
-		accR[n] += s * gr;
+		if(accR)
+			accR[n] += s * gr;
 		accSend[n] += s * gs;
 		st.pos += st.step;
 		if(lp.on){

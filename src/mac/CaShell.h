@@ -21,6 +21,9 @@ struct ShellInfo
 	uint32_t rebuilds;
 	uint32_t stalls;
 	bool spatialBypassed;
+	bool spatialUnavailable;
+	int32_t hrtfAtStart, hrtfAfterSecond;
+	uint32_t hrtfReadings;
 	bool fellBack;
 	char device[128];
 };
@@ -29,6 +32,7 @@ bool ShellStart(Shared *shared, const char *deviceUid);
 void ShellStop(void);
 ShellInfo ShellGetInfo(void);
 void ShellSetDevice(const char *uid);
+void ShellSetSpatial(bool on);
 int ShellDeviceCount(void);
 bool ShellDeviceAt(int index, char *name, size_t nameSize, char *uid, size_t uidSize);
 uint32_t ShellDeviceListGeneration(void);
