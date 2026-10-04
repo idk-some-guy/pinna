@@ -7,8 +7,16 @@
 #include "CaFilter.h"
 #include "CaStream.h"
 #include "CaSpatial.h"
+#include "CaEnvironment.h"
 
 namespace ca {
+
+struct EnvSnap
+{
+	int8_t place;
+	float amount;
+	uint32_t serial;
+};
 
 struct Snapshot
 {
@@ -16,6 +24,7 @@ struct Snapshot
 	uint8_t mode;
 	VoiceSnap voice[kChannels];
 	StreamSnap stream[kStreams];
+	EnvSnap env;
 };
 
 struct Shared
@@ -28,6 +37,7 @@ struct Shared
 	std::atomic<uint32_t> underruns;
 	std::atomic<uint32_t> streamLatency;
 	std::atomic<uint32_t> renders;
+	std::atomic<int32_t> envPlace;
 	ChunkRing ring[kStreams];
 	StreamStatus status[kStreams];
 	Shared(void);
@@ -36,6 +46,26 @@ struct Shared
 struct SpatialRender
 {
 	int32_t algorithm;
+};
+
+struct RouteSpan
+{
+	bool before, after;
+	uint32_t split;
+};
+
+class EnvPair
+{
+public:
+	void init(int place);
+	int observe(const EnvSnap &e, int *place);
+	void refuse(int unit);
+	void split(const float *send, uint32_t from, uint32_t to, float *a, float *b, uint32_t frames, float rate);
+	const EnvState &state(void) const { return mState; }
+private:
+	EnvState mState, mBefore;
+	uint32_t mSerial;
+	bool mFresh;
 };
 
 class Mixer
@@ -53,6 +83,8 @@ public:
 	// The spatial block's chunks of SpatialChunkFrames, each with its own direction per voice.
 	uint32_t chunks(void) const { return mChunks; }
 	Direction direction(int c, uint32_t k) const { return k < mDirChunks[c] ? mChunkDir[c][k] : direction(c); }
+	RouteSpan route(void) const { return mRoute; }
+	const EnvSnap &env(void) const { return mEnv; }
 private:
 	void SwapRoute(int c);
 	void MoveRoute(int c, const VoiceSnap &to);
@@ -78,6 +110,8 @@ private:
 	float mShelfHF[kChannels];
 	float mShelfRate;
 	float mVoiceSend[kMaxBlock];
+	RouteSpan mRoute;
+	EnvSnap mEnv;
 	StreamReader mReader[kStreams];
 };
 

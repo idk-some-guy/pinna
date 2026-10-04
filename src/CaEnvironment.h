@@ -64,7 +64,7 @@ EnvClampPlace(int place)
 inline float
 EnvRay(float d)
 {
-	return d >= 0.0f ? d : kEnvRayMax;
+	return d > 0.0f ? d : kEnvRayMax;
 }
 
 inline int

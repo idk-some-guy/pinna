@@ -3,7 +3,7 @@
 
 namespace ca {
 
-Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLatency(0), renders(0)
+Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLatency(0), renders(0), envPlace(ENV_OPEN)
 {
 	for(int c = 0; c < kChannels; c++){
 		finishedId[c].store(0);
@@ -16,6 +16,9 @@ Mixer::Mixer(Shared *shared) : mShared(shared), mRouteSpatial(false), mHeadSpati
 	mDip.phase = kDipIdle;
 	mDip.frame = 0;
 	mChunks = 0;
+	mRoute.before = mRoute.after = false;
+	mRoute.split = 0;
+	memset(&mEnv, 0, sizeof(mEnv));
 	memset(mChunkDir, 0, sizeof(mChunkDir));
 	memset(mDirChunks, 0, sizeof(mDirChunks));
 	memset(mVoice, 0, sizeof(mVoice));
@@ -77,6 +80,21 @@ Mixer::Silent(void) const
 	return true;
 }
 
+static inline VoiceSnap
+RoutedSnap(const VoiceSnap &v, bool spatial, bool mono)
+{
+	VoiceSnap r = v;
+	if(mono){
+		r.gainL = r.monoGain;
+		r.gainR = 0.0f;
+	}
+	if(spatial){
+		r.send = r.envSend;
+		r.sendHF = r.envSendHF;
+	}
+	return r;
+}
+
 bool
 Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, uint32_t frames, float outRate, const SpatialRender *spatial)
 {
@@ -109,6 +127,10 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 	bool route0 = mRouteSpatial, route1 = switchAt >= 0 ? mHeadSpatial : route0;
 	uint32_t split = switchAt >= 0 ? (uint32_t)switchAt : frames;
 	mRouteSpatial = route1;
+	mRoute.before = route0;
+	mRoute.after = route1;
+	mRoute.split = split;
+	mEnv = s.env;
 	bool spatialMode = (route0 && split > 0) || (route1 && split < frames);
 	uint32_t chunk = SpatialChunkFrames(outRate);
 	mChunks = spatialMode ? (frames + chunk - 1) / chunk : 0;
@@ -122,21 +144,14 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		bool toMono = route0 && !s.voice[c].routeBypass;
 		bool toMonoLater = route1 && !s.voice[c].routeBypass;
 		bool moves = toMono != toMonoLater;
+		bool switches = route0 != route1;
 		VoiceSnap later;
-		if(moves){
-			later = s.voice[c];
-			if(toMonoLater){
-				later.gainL = later.monoGain;
-				later.gainR = 0.0f;
-			}
-		}
-		VoiceSnap monoSnap;
-		if(toMono){
-			monoSnap = s.voice[c];
-			monoSnap.gainL = monoSnap.monoGain;
-			monoSnap.gainR = 0.0f;
-		}
-		const VoiceSnap &sn = toMono ? monoSnap : s.voice[c];
+		if(switches)
+			later = RoutedSnap(s.voice[c], route1, toMonoLater);
+		VoiceSnap first;
+		if(route0)
+			first = RoutedSnap(s.voice[c], true, toMono);
+		const VoiceSnap &sn = route0 ? first : s.voice[c];
 		VoiceState &st = mVoice[c];
 		bool started = false;
 		if(sn.playId != st.playId){
@@ -189,19 +204,20 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		}else
 			mDirLive[c] = false;
 		Biquad &shelf = mShelf[c];
-		if(sn.sendHF != mShelfHF[c]){
-			HighShelf(shelf, 5000.0f, outRate, sn.sendHF);
-			mShelfHF[c] = sn.sendHF;
-		}
 		const VoiceSnap *cur = &sn;
 		bool mono = toMono;
 		for(uint32_t done = 0; done < frames && (st.active || st.fadeLeft || mTailLeft[c]);){
-			if(moves && done == split){
-				MoveRoute(c, later);
+			if(switches && done == split){
+				if(moves)
+					MoveRoute(c, later);
 				mLast[c] = later;
 				cur = &later;
 				mono = toMonoLater;
-				moves = false;
+				moves = switches = false;
+			}
+			if(cur->sendHF != mShelfHF[c]){
+				HighShelf(shelf, 5000.0f, outRate, cur->sendHF);
+				mShelfHF[c] = cur->sendHF;
 			}
 			uint32_t end = done < split ? split : frames;
 			uint32_t n = end - done < (uint32_t)kMaxBlock ? end - done : (uint32_t)kMaxBlock;
@@ -262,6 +278,55 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 	mShared->activeVoices.store(active, std::memory_order_relaxed);
 	mShared->renders.fetch_add(1, std::memory_order_release);
 	return spatialMode;
+}
+
+void
+EnvPair::init(int place)
+{
+	EnvInit(mState, place);
+	mBefore = mState;
+	mSerial = 0;
+	mFresh = true;
+}
+
+int
+EnvPair::observe(const EnvSnap &e, int *place)
+{
+	if(!mFresh && e.serial == mSerial)
+		return -1;
+	mFresh = false;
+	mSerial = e.serial;
+	int idle = mState.slotB == mState.current ? 0 : 1;
+	mBefore = mState;
+	if(!EnvObserve(mState, e.place))
+		return -1;
+	*place = mState.current;
+	return idle;
+}
+
+void
+EnvPair::refuse(int unit)
+{
+	mState = mBefore;
+	if(unit == 0)
+		mState.slotA = -1;
+	else
+		mState.slotB = -1;
+}
+
+void
+EnvPair::split(const float *send, uint32_t from, uint32_t to, float *a, float *b, uint32_t frames, float rate)
+{
+	float wa, wb;
+	for(uint32_t i = 0; i < frames;){
+		uint32_t n = mState.fadeLeft != 0 ? 1 : frames - i;
+		EnvFadeAdvance(mState, n, rate, &wa, &wb);
+		for(uint32_t end = i + n; i < end; i++){
+			bool on = i >= from && i < to;
+			a[i] = on ? send[i] * wa : 0.0f;
+			b[i] = on ? send[i] * wb : 0.0f;
+		}
+	}
 }
 
 }

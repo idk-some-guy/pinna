@@ -20,6 +20,7 @@ struct VoiceSnap
 	uint32_t baseRate;
 	float azimuth, elevation, monoGain;
 	uint8_t routeBypass;
+	float envSend, envSendHF;
 };
 
 struct VoiceState

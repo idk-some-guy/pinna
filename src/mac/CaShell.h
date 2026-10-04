@@ -31,6 +31,7 @@ struct ShellInfo
 
 bool ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref = OUTPUT_AUTO, int32_t algorithm = kSpatialUseOutputType);
 void ShellStop(void);
+void ShellService(void);
 ShellInfo ShellGetInfo(void);
 int32_t ShellOutputType(void);
 void ShellSetDevice(const char *uid);
