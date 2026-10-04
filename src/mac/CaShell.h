@@ -24,13 +24,15 @@ struct ShellInfo
 	bool spatialUnavailable;
 	int32_t hrtfAtStart, hrtfAfterSecond;
 	uint32_t hrtfReadings;
+	int32_t outputType;
 	bool fellBack;
 	char device[128];
 };
 
-bool ShellStart(Shared *shared, const char *deviceUid);
+bool ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref = OUTPUT_AUTO, int32_t algorithm = kSpatialUseOutputType);
 void ShellStop(void);
 ShellInfo ShellGetInfo(void);
+int32_t ShellOutputType(void);
 void ShellSetDevice(const char *uid);
 void ShellSetSpatial(bool on);
 int ShellDeviceCount(void);

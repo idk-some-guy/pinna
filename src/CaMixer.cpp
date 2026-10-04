@@ -11,8 +11,10 @@ Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLa
 	}
 }
 
-Mixer::Mixer(Shared *shared) : mShared(shared), mShelfRate(0.0f)
+Mixer::Mixer(Shared *shared) : mShared(shared), mRouteSpatial(false), mHeadSpatial(false), mShelfRate(0.0f)
 {
+	mDip.phase = kDipIdle;
+	mDip.frame = 0;
 	mChunks = 0;
 	memset(mChunkDir, 0, sizeof(mChunkDir));
 	memset(mDirChunks, 0, sizeof(mDirChunks));
@@ -52,6 +54,29 @@ Mixer::SwapRoute(int c)
 	mRouteMono[c] = !mRouteMono[c];
 }
 
+void
+Mixer::MoveRoute(int c, const VoiceSnap &to)
+{
+	VoiceState &st = mVoice[c];
+	st.fadeLeft = 0;
+	mTailLeft[c] = 0;
+	if(st.active){
+		st.gainL = st.targetL = to.gainL;
+		st.gainR = st.targetR = to.gainR;
+		st.incL = st.incR = 0.0f;
+	}
+	mRouteMono[c] = !mRouteMono[c];
+}
+
+bool
+Mixer::Silent(void) const
+{
+	for(int c = 0; c < kChannels; c++)
+		if(mVoice[c].active || mVoice[c].fadeLeft || mTailLeft[c])
+			return false;
+	return true;
+}
+
 bool
 Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, uint32_t frames, float outRate, const SpatialRender *spatial)
 {
@@ -64,7 +89,27 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 	if(outRate != mShelfRate)
 		for(int c = 0; c < kChannels; c++)
 			mShelfHF[c] = -1.0f;
-	bool spatialMode = spatial && s.mode == MODE_SPATIAL && frames <= (uint32_t)kMaxBlock;
+	bool usable = spatial && frames <= (uint32_t)kMaxBlock;
+	bool want = usable && s.mode == MODE_SPATIAL;
+	if(!usable){
+		mRouteSpatial = mHeadSpatial = false;
+		if(frames > (uint32_t)kMaxBlock)
+			mDip.phase = kDipIdle;
+	}else if(mDip.phase == kDipOut)
+		mHeadSpatial = want;
+	else if(want != mRouteSpatial){
+		mHeadSpatial = want;
+		if(mDip.phase == kDipIdle && Silent())
+			mRouteSpatial = want;
+		else
+			ModeDipStart(mDip);
+	}
+	bool dipping = mDip.phase != kDipIdle;
+	int32_t switchAt = dipping ? ModeDipFill(mDip, mModeGain, frames) : -1;
+	bool route0 = mRouteSpatial, route1 = switchAt >= 0 ? mHeadSpatial : route0;
+	uint32_t split = switchAt >= 0 ? (uint32_t)switchAt : frames;
+	mRouteSpatial = route1;
+	bool spatialMode = (route0 && split > 0) || (route1 && split < frames);
 	uint32_t chunk = SpatialChunkFrames(outRate);
 	mChunks = spatialMode ? (frames + chunk - 1) / chunk : 0;
 	if(spatialMode)
@@ -72,7 +117,17 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 			memset(mMono[c], 0, frames * sizeof(float));
 	uint32_t active = 0;
 	for(int c = 0; c < kChannels; c++){
-		bool toMono = spatialMode && !s.voice[c].routeBypass;
+		bool toMono = route0 && !s.voice[c].routeBypass;
+		bool toMonoLater = route1 && !s.voice[c].routeBypass;
+		bool moves = toMono != toMonoLater;
+		VoiceSnap later;
+		if(moves){
+			later = s.voice[c];
+			if(toMonoLater){
+				later.gainL = later.monoGain;
+				later.gainR = 0.0f;
+			}
+		}
 		VoiceSnap monoSnap;
 		if(toMono){
 			monoSnap = s.voice[c];
@@ -115,16 +170,20 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(!sn.playing)
 			StopVoice(st, sn);
 		if(!st.active && !st.fadeLeft && !mTailLeft[c]){
+			if(moves){
+				mRouteMono[c] = toMonoLater;
+				mLast[c] = later;
+			}
 			mDirLive[c] = false;
 			continue;
 		}
 		if(st.active)
 			active++;
 		bool dipped = false;
-		if(toMono){
+		if(toMono || toMonoLater){
 			Direction target = { sn.azimuth, sn.elevation };
 			mDirChunks[c] = VoiceDirectionBlock(mDir[c], target, started || !mDirLive[c], spatial->algorithm, frames, outRate, mChunkDir[c], mDipGain, &dipped);
-			mDirLive[c] = true;
+			mDirLive[c] = toMonoLater;
 		}else
 			mDirLive[c] = false;
 		Biquad &shelf = mShelf[c];
@@ -132,13 +191,23 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 			HighShelf(shelf, 5000.0f, outRate, sn.sendHF);
 			mShelfHF[c] = sn.sendHF;
 		}
+		const VoiceSnap *cur = &sn;
+		bool mono = toMono;
 		for(uint32_t done = 0; done < frames && (st.active || st.fadeLeft || mTailLeft[c]);){
-			uint32_t n = frames - done < (uint32_t)kMaxBlock ? frames - done : (uint32_t)kMaxBlock;
-			bool sending = st.send != 0.0f || sn.send != 0.0f || st.fadeLeft != 0 || mTailLeft[c] != 0 || shelf.z1 != 0.0f || shelf.z2 != 0.0f;
+			if(moves && done == split){
+				MoveRoute(c, later);
+				mLast[c] = later;
+				cur = &later;
+				mono = toMonoLater;
+				moves = false;
+			}
+			uint32_t end = done < split ? split : frames;
+			uint32_t n = end - done < (uint32_t)kMaxBlock ? end - done : (uint32_t)kMaxBlock;
+			bool sending = st.send != 0.0f || cur->send != 0.0f || st.fadeLeft != 0 || mTailLeft[c] != 0 || shelf.z1 != 0.0f || shelf.z2 != 0.0f;
 			if(sending)
 				memset(mVoiceSend, 0, n * sizeof(float));
-			bool ended = toMono ? RenderVoice(st, sn, outRate, mMono[c] + done, NULL, mVoiceSend, n) : RenderVoice(st, sn, outRate, dryL + done, dryR + done, mVoiceSend, n);
-			if(dipped)
+			bool ended = mono ? RenderVoice(st, *cur, outRate, mMono[c] + done, NULL, mVoiceSend, n) : RenderVoice(st, *cur, outRate, dryL + done, dryR + done, mVoiceSend, n);
+			if(dipped && mono)
 				for(uint32_t i = 0; i < n; i++)
 					mMono[c][done + i] *= mDipGain[done + i];
 			if(mTailLeft[c]){
@@ -165,8 +234,23 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 				mShared->finishedId[c].store(st.playId, std::memory_order_release);
 			done += n;
 		}
+		if(moves){
+			mRouteMono[c] = toMonoLater;
+			mLast[c] = later;
+		}
 		if(!st.active)
 			mShared->readerSlot[c].store(-1, std::memory_order_release);
+	}
+	if(dipping){
+		for(uint32_t i = 0; i < frames; i++){
+			dryL[i] *= mModeGain[i];
+			dryR[i] *= mModeGain[i];
+			send[i] *= mModeGain[i];
+		}
+		if(spatialMode)
+			for(int c = 0; c < kChannels; c++)
+				for(uint32_t i = 0; i < frames; i++)
+					mMono[c][i] *= mModeGain[i];
 	}
 	uint32_t latency = mShared->streamLatency.load(std::memory_order_relaxed);
 	for(int st = 0; st < kStreams; st++)

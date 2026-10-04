@@ -6,6 +6,7 @@
 #include <strings.h>
 #include "CaConfig.h"
 #include "CaDevice.h"
+#include "CaSpatial.h"
 
 namespace ca {
 
@@ -14,11 +15,14 @@ struct AudioEnginePrefs
 	int32_t mode;
 	int32_t outputType;
 	char outputDevice[128];
+	int32_t algorithm;
 };
 
 extern AudioEnginePrefs gAudioEnginePrefs;
 
 static const int32_t kModeUnknown = -1;
+static const int32_t kAlgorithmUnknown = -1;
+static const int32_t kDefaultMode = MODE_SPATIAL;
 
 enum { kMaxProviders = 64 };
 
@@ -32,6 +36,8 @@ struct ProviderList
 };
 
 static const char *const kModeNames[NUM_MODES] = { "classic", "spatial", "reimagined" };
+static const char *const kAlgorithmNames[2] = { "auto", "hrtfhq" };
+static_assert(kSpatialUseOutputType == 0 && kSpatialHRTFHQ == 1, "algorithm names");
 static const char *const kOutputNames[NUM_OUTPUTS] = { "auto", "headphones", "builtin", "external", "multichannel" };
 static const char *const kOutputMenuLabels[NUM_OUTPUTS] = { "AUTO (NOT USED YET)", "HEADPHONES (NOT USED YET)", "BUILT-IN (NOT USED YET)",
 	"EXTERNAL (NOT USED YET)", "MULTICHANNEL (NOT USED YET)" };
@@ -39,9 +45,32 @@ static const char *const kOutputMenuLabels[NUM_OUTPUTS] = { "AUTO (NOT USED YET)
 inline void
 PrefsDefaults(AudioEnginePrefs &p)
 {
-	p.mode = MODE_CLASSIC;
+	p.mode = kDefaultMode;
 	p.outputType = OUTPUT_AUTO;
 	strcpy(p.outputDevice, "default");
+	p.algorithm = kSpatialUseOutputType;
+}
+
+inline const char *
+AlgorithmName(int32_t a)
+{
+	return a == kSpatialHRTFHQ ? kAlgorithmNames[1] : kAlgorithmNames[0];
+}
+
+inline int32_t
+AlgorithmFromName(const char *s, int32_t fallback)
+{
+	for(int32_t i = 0; i < 2; i++)
+		if(strcasecmp(s, kAlgorithmNames[i]) == 0)
+			return i;
+	return fallback;
+}
+
+inline int32_t
+ResolveAlgorithm(int32_t requested, bool *fellBack)
+{
+	*fellBack = requested != kSpatialUseOutputType && requested != kSpatialHRTFHQ;
+	return *fellBack ? kSpatialUseOutputType : requested;
 }
 
 inline const char *
@@ -83,8 +112,8 @@ OutputTypeMenuLabel(int32_t t)
 inline int32_t
 ResolveMode(int32_t requested, bool *fellBack)
 {
-	*fellBack = requested != MODE_CLASSIC;
-	return MODE_CLASSIC;
+	*fellBack = requested != MODE_CLASSIC && requested != MODE_SPATIAL;
+	return requested == MODE_SPATIAL || requested == MODE_REIMAGINED ? MODE_SPATIAL : MODE_CLASSIC;
 }
 
 inline int32_t
@@ -118,6 +147,8 @@ PrefsLoad(AudioEnginePrefs &p, int8_t *speakers, Read read)
 	}else
 		p.outputType = OutputTypeFromSpeakers(*speakers);
 	read("OutputDevice", p.outputDevice, (int)sizeof(p.outputDevice));
+	if(read("SpatialAlgorithm", buf, (int)sizeof(buf)))
+		p.algorithm = AlgorithmFromName(buf, kAlgorithmUnknown);
 }
 
 template<class Store>
@@ -128,6 +159,7 @@ PrefsSave(AudioEnginePrefs &p, int8_t speakers, Store store)
 	store("Mode", ModeName(p.mode));
 	store("OutputType", OutputTypeName(p.outputType));
 	store("OutputDevice", FollowsDefault(p.outputDevice) ? "default" : p.outputDevice);
+	store("SpatialAlgorithm", AlgorithmName(p.algorithm));
 }
 
 inline void

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "CaConfig.h"
 
 namespace ca {
 
@@ -12,7 +13,57 @@ struct DeviceEntry
 	char name[64];
 	uint32_t outputChannels;
 	bool alive;
+	uint32_t transport, terminal, dataSource;
 };
+
+constexpr uint32_t
+FourCC(char a, char b, char c, char d)
+{
+	return (uint32_t)(uint8_t)a << 24 | (uint32_t)(uint8_t)b << 16 | (uint32_t)(uint8_t)c << 8 | (uint32_t)(uint8_t)d;
+}
+
+static const uint32_t kTransportBuiltIn = FourCC('b', 'l', 't', 'n');
+static const uint32_t kTransportUSB = FourCC('u', 's', 'b', ' ');
+static const uint32_t kTransportBluetooth = FourCC('b', 'l', 'u', 'e');
+static const uint32_t kTransportBluetoothLE = FourCC('b', 'l', 'e', 'a');
+static const uint32_t kTransportHDMI = FourCC('h', 'd', 'm', 'i');
+static const uint32_t kTransportDisplayPort = FourCC('d', 'p', 'r', 't');
+static const uint32_t kTransportVirtual = FourCC('v', 'i', 'r', 't');
+static const uint32_t kTerminalHeadphones = FourCC('h', 'd', 'p', 'h');
+static const uint32_t kTerminalSpeaker = FourCC('s', 'p', 'k', 'r');
+static const uint32_t kTerminalLine = FourCC('l', 'i', 'n', 'e');
+static const uint32_t kDataSourceHeadphones = FourCC('h', 'd', 'p', 'n');
+static const uint32_t kDataSourceInternalSpeaker = FourCC('i', 's', 'p', 'k');
+
+inline uint32_t
+SummariseTerminals(const uint32_t *terminals, int count)
+{
+	for(int i = 0; i < count; i++)
+		if(terminals[i] == kTerminalHeadphones)
+			return kTerminalHeadphones;
+	return count > 0 ? terminals[0] : 0;
+}
+
+inline int32_t
+DetectOutputType(const DeviceEntry &d)
+{
+	if(d.terminal == kTerminalHeadphones || (d.transport == kTransportBuiltIn && d.dataSource == kDataSourceHeadphones))
+		return OUTPUT_HEADPHONES;
+	if(d.outputChannels > 2)
+		return OUTPUT_MULTICHANNEL;
+	if(d.transport == kTransportBuiltIn && d.dataSource == kDataSourceInternalSpeaker)
+		return OUTPUT_BUILTIN;
+	bool usbOrBluetooth = d.transport == kTransportUSB || d.transport == kTransportBluetooth || d.transport == kTransportBluetoothLE;
+	if(usbOrBluetooth && d.terminal == 0)
+		return OUTPUT_HEADPHONES;
+	return OUTPUT_EXTERNAL;
+}
+
+inline int32_t
+EffectiveOutputType(int32_t pref, const DeviceEntry &d)
+{
+	return pref > OUTPUT_AUTO && pref < NUM_OUTPUTS ? pref : DetectOutputType(d);
+}
 
 struct DeviceChoice
 {

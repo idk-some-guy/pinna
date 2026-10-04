@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <math.h>
+#include "CaConfig.h"
 #include "CaRules.h"
 
 namespace ca {
@@ -106,6 +107,18 @@ ModeDipGain(DipState &s, uint32_t frames)
 static const float kSpatialCalibHeadphones = 0.8128f;
 static const float kSpatialCalibBuiltInSpeakers = 0.8442f;
 static const uint32_t kJumpRampFrames = 256;
+
+inline bool
+OutputRoutesSpatial(int32_t type)
+{
+	return type == OUTPUT_HEADPHONES || type == OUTPUT_BUILTIN;
+}
+
+inline float
+SpatialCalibFor(int32_t type)
+{
+	return type == OUTPUT_BUILTIN ? kSpatialCalibBuiltInSpeakers : kSpatialCalibHeadphones;
+}
 
 enum
 {

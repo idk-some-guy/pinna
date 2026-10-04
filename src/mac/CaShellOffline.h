@@ -22,6 +22,10 @@ void ShellFailSpatialOnceForTest(int unit = 0);
 typedef void (*ClockTapFn)(void *ctx, const float *dryL, const float *dryR, const float *send, const float *strL, const float *strR, uint32_t frames, double rate);
 // Set only while the clock is stopped or asleep on a test clock time.
 void ShellClockTapForTest(ClockTapFn tap, void *ctx);
+typedef void (*BlockTapFn)(void *ctx, const Mixer &mixer, bool spatial, const float *strL, const float *strR, uint32_t frames);
+void ShellBlockTapForTest(BlockTapFn tap, void *ctx);
+// The spatial unit's output type and algorithm as engine values read back from the unit, -1 with no unit.
+void ShellSpatialUnitForTest(int32_t *outputType, int32_t *algorithm, float *calib);
 void ShellFakeDevicesForTest(const DeviceEntry *list, const double *rates, int count, uint32_t defaultId);
 void ShellPostEventForTest(int event, uint32_t id);
 void ShellBufferEventForTest(uint32_t frames);

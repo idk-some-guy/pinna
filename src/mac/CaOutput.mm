@@ -30,7 +30,8 @@ static AudioUnit sOutput, sSpatial, sReverb, sSpatial3D;
 static bool sSpatialBypass, sSpatial3DUnavailable;
 static SpatialRender sSpatialRender = { kSpatialUseOutputType };
 static int32_t sSpatialAlgorithm = kSpatialUseOutputType;
-static UInt32 sSpatialOutputType = kSpatialMixerOutputType_Headphones;
+static int32_t sOutputPref = OUTPUT_AUTO;
+static std::atomic<int32_t> sOutputType(OUTPUT_HEADPHONES);
 static float sSetAz[kChannels], sSetEl[kChannels];
 static float sSilence[kMaxBlock];
 static std::atomic<uint64_t> sSpatialFrames;
@@ -81,6 +82,8 @@ static bool sFailSpatialOnce, sFailSpatial3DOnce;
 static std::atomic<uint32_t> sFailSpatial3DPulls;
 static ClockTapFn sClockTap;
 static void *sClockTapCtx;
+static BlockTapFn sBlockTap;
+static void *sBlockTapCtx;
 #endif
 
 struct ReverbParam
@@ -205,7 +208,7 @@ SetupSpatial(double rate)
 }
 
 static bool
-SetupSpatial3D(double rate, int32_t algorithm, UInt32 outputType)
+SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 {
 #ifdef CA_SHELL_OFFLINE
 	if(sFailSpatial3DOnce){
@@ -222,6 +225,7 @@ SetupSpatial3D(double rate, int32_t algorithm, UInt32 outputType)
 	UInt32 inputs = kSpatial3DInputs, maxFrames = kMaxBlock, bypass = kSpatialMixerSourceMode_Bypass, noFlags = 0, off = 0;
 	UInt32 flags = kSpatialMixerRenderingFlags_InterAuralDelay;
 	UInt32 alg = algorithm == kSpatialHRTFHQ ? kSpatializationAlgorithm_HRTFHQ : kSpatializationAlgorithm_UseOutputType;
+	UInt32 outputType = type == OUTPUT_BUILTIN ? kSpatialMixerOutputType_BuiltInSpeakers : kSpatialMixerOutputType_Headphones;
 	AudioStreamBasicDescription stereo = StereoFormat(rate), mono = StereoFormat(rate, 1);
 	bool ok = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_ElementCount, kAudioUnitScope_Input, 0, &inputs, sizeof(inputs)) == noErr;
 	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof(maxFrames)) == noErr;
@@ -252,7 +256,7 @@ SetupSpatial3D(double rate, int32_t algorithm, UInt32 outputType)
 		return false;
 	}
 	sSpatialRender.algorithm = algorithm;
-	sSpatialCalib = outputType == kSpatialMixerOutputType_BuiltInSpeakers ? kSpatialCalibBuiltInSpeakers : kSpatialCalibHeadphones;
+	sSpatialCalib = SpatialCalibFor(type);
 	sFailedPulls = 0;
 	for(int c = 0; c < kChannels; c++)
 		sSetAz[c] = sSetEl[c] = NAN;
@@ -322,6 +326,10 @@ static void
 RenderBlock(float *L, float *R, UInt32 frames)
 {
 	bool spatial = sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, frames, (float)sRate, sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? &sSpatialRender : NULL);
+#ifdef CA_SHELL_OFFLINE
+	if(sBlockTap)
+		sBlockTap(sBlockTapCtx, *sMixer, spatial, sStrL, sStrR, frames);
+#endif
 	if(spatial){
 		UInt32 chunk = SpatialChunkFrames((float)sRate);
 		bool failed = false;
@@ -463,6 +471,16 @@ ReadDeviceName(AudioObjectID dev, char *out, size_t size)
 	}
 }
 
+static uint32_t
+ReadUInt32(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObjectPropertyScope scope)
+{
+	AudioObjectPropertyAddress a = { sel, scope, kAudioObjectPropertyElementMain };
+	UInt32 v = 0, size = sizeof(v);
+	if(!AudioObjectHasProperty(obj, &a) || AudioObjectGetPropertyData(obj, &a, 0, NULL, &size, &v) != noErr)
+		return 0;
+	return v;
+}
+
 static bool
 ReadDevice(AudioObjectID dev, DeviceEntry &e)
 {
@@ -495,6 +513,17 @@ ReadDevice(AudioObjectID dev, DeviceEntry &e)
 	size = sizeof(alive);
 	AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &alive);
 	e.alive = alive != 0;
+	e.transport = ReadUInt32(dev, kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal);
+	e.dataSource = ReadUInt32(dev, kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeOutput);
+	AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+	AudioStreamID streams[16];
+	uint32_t terminals[16];
+	size = sizeof(streams);
+	int count = 0;
+	if(AudioObjectGetPropertyData(dev, &sa, 0, NULL, &size, streams) == noErr)
+		for(UInt32 i = 0; i < size / sizeof(AudioStreamID) && i < 16; i++)
+			terminals[count++] = ReadUInt32(streams[i], kAudioStreamPropertyTerminalType, kAudioObjectPropertyScopeGlobal);
+	e.terminal = SummariseTerminals(terminals, count);
 	return true;
 }
 
@@ -703,7 +732,8 @@ SetupSpatialOrBypass(double rate)
 	if(bypass)
 		printf("sampman_ca: spatial mixer unavailable, classic stereo bypasses it\n");
 	DisposeUnit(&sSpatial3D);
-	bool unavailable = !SetupSpatial3D(rate, sSpatialAlgorithm, sSpatialOutputType);
+	int32_t type = sOutputType.load(std::memory_order_relaxed);
+	bool unavailable = OutputRoutesSpatial(type) && !SetupSpatial3D(rate, sSpatialAlgorithm, type);
 	sSpatialFrames.store(0, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
@@ -752,11 +782,23 @@ ArmHrtfReading(void)
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), sControl, ^{ CheckHrtfLater(session, readings); });
 }
 
+static void
+ResolveOutputType(AudioObjectID dev)
+{
+	DeviceEntry e;
+	memset(&e, 0, sizeof(e));
+	for(int i = 0; i < sNumDevices; i++)
+		if(sDevices[i].id == dev)
+			e = sDevices[i];
+	sOutputType.store(EffectiveOutputType(sOutputPref, e), std::memory_order_relaxed);
+}
+
 static bool
 OpenOutput(AudioObjectID dev)
 {
 	char name[128];
 	ReadDeviceName(dev, name, sizeof(name));
+	ResolveOutputType(dev);
 #ifdef CA_SHELL_OFFLINE
 	if(sFake){
 		double rate = 0.0;
@@ -926,11 +968,14 @@ UnwatchSystem(void)
 }
 
 bool
-ShellStart(Shared *shared, const char *deviceUid)
+ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t algorithm)
 {
 #ifdef CA_SHELL_OFFLINE
-	if(gShellOffline)
+	if(gShellOffline){
+		sOutputPref = outputPref;
+		sSpatialAlgorithm = algorithm;
 		return ShellStartOffline(shared, 48000.0);
+	}
 	if(!sFake){
 		printf("sampman_ca: the offline tools never open a real device\n");
 		return false;
@@ -956,6 +1001,8 @@ ShellStart(Shared *shared, const char *deviceUid)
 	dispatch_sync(sControl, ^{
 		sStopping = false;
 		sSpatialWanted = false;
+		sOutputPref = outputPref;
+		sSpatialAlgorithm = algorithm;
 		sSession++;
 		strlcpy(sPinned, pin, sizeof(sPinned));
 		WatchSystem();
@@ -1053,6 +1100,7 @@ ShellStartOffline(Shared *shared, double rate)
 	sMixer = new Mixer(shared);
 	sSampleTime = 0;
 	sSpatialFailed.store(false, std::memory_order_relaxed);
+	sOutputType.store(sOutputPref > OUTPUT_AUTO && sOutputPref < NUM_OUTPUTS ? sOutputPref : OUTPUT_HEADPHONES, std::memory_order_relaxed);
 	OutputFormat(rate, 512, 0, "offline");
 	return SetupSpatialOrBypass(rate);
 }
@@ -1116,6 +1164,29 @@ ShellClockTapForTest(ClockTapFn tap, void *ctx)
 {
 	sClockTap = tap;
 	sClockTapCtx = ctx;
+}
+
+void
+ShellBlockTapForTest(BlockTapFn tap, void *ctx)
+{
+	sBlockTap = tap;
+	sBlockTapCtx = ctx;
+}
+
+void
+ShellSpatialUnitForTest(int32_t *outputType, int32_t *algorithm, float *calib)
+{
+	EnsureControl();
+	dispatch_sync(sControl, ^{
+		*outputType = *algorithm = -1;
+		*calib = sSpatialCalib;
+		UInt32 v = 0, size = sizeof(v);
+		if(sSpatial3D && AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerOutputType, kAudioUnitScope_Global, 0, &v, &size) == noErr)
+			*outputType = v == kSpatialMixerOutputType_Headphones ? OUTPUT_HEADPHONES : v == kSpatialMixerOutputType_BuiltInSpeakers ? OUTPUT_BUILTIN : OUTPUT_EXTERNAL;
+		size = sizeof(v);
+		if(sSpatial3D && AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatializationAlgorithm, kAudioUnitScope_Input, 0, &v, &size) == noErr)
+			*algorithm = v == kSpatializationAlgorithm_HRTFHQ ? kSpatialHRTFHQ : v == kSpatializationAlgorithm_UseOutputType ? kSpatialUseOutputType : 99;
+	});
 }
 
 void
@@ -1311,10 +1382,17 @@ ShellGetInfo(void)
 	i.hrtfAtStart = sHrtfStart;
 	i.hrtfAfterSecond = sHrtfLater;
 	i.hrtfReadings = sHrtfReadings;
+	i.outputType = sOutputType.load(std::memory_order_relaxed);
 	i.fellBack = sFellBack;
 	strncpy(i.device, sDeviceName, sizeof(i.device) - 1);
 	i.device[sizeof(i.device) - 1] = '\0';
 	return i;
+}
+
+int32_t
+ShellOutputType(void)
+{
+	return sOutputType.load(std::memory_order_relaxed);
 }
 
 }

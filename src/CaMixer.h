@@ -46,6 +46,7 @@ public:
 	Mixer(const Mixer &) = delete;
 	Mixer &operator=(const Mixer &) = delete;
 	// With spatial set and the snapshot in spatial mode, positioned voices go to mono() and the dry bus carries the bypass voices.
+	// A change of mode while voices sound dips the voice buses and switches the routing in the silence; spatial NULL switches to classic at once.
 	bool render(float *dryL, float *dryR, float *send, float *strL, float *strR, uint32_t frames, float outRate, const SpatialRender *spatial = NULL);
 	const float *mono(int c) const { return mMono[c]; }
 	Direction direction(int c) const { Direction d = { mDir[c].azimuth, mDir[c].elevation }; return d; }
@@ -54,7 +55,12 @@ public:
 	Direction direction(int c, uint32_t k) const { return k < mDirChunks[c] ? mChunkDir[c][k] : direction(c); }
 private:
 	void SwapRoute(int c);
+	void MoveRoute(int c, const VoiceSnap &to);
+	bool Silent(void) const;
 	Shared *mShared;
+	DipState mDip;
+	bool mRouteSpatial, mHeadSpatial;
+	float mModeGain[kMaxBlock];
 	float *mMono[kChannels];
 	float mDipGain[kMaxBlock];
 	VoiceDirection mDir[kChannels];
