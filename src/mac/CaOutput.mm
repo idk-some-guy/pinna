@@ -37,6 +37,7 @@ static float sSetAz[kChannels], sSetEl[kChannels];
 static float sSilence[kMaxBlock];
 static std::atomic<uint64_t> sSpatialFrames;
 static std::atomic<bool> sSpatialFailed;
+static std::atomic<int32_t> sClockSpatial(-1);
 static uint32_t sFailedPulls;
 static int32_t sHrtfStart = -1, sHrtfLater = -1;
 static uint32_t sHrtfReadings, sHrtfArms;
@@ -81,6 +82,7 @@ struct FakeRetry { int64_t due; uint32_t session; };
 static std::vector<FakeRetry> sFakeRetries;
 static bool sFailSpatialOnce, sFailSpatial3DOnce;
 static std::atomic<uint32_t> sFailSpatial3DPulls;
+static std::atomic<uint64_t> sClassicFrames;
 static ClockTapFn sClockTap;
 static void *sClockTapCtx;
 static BlockTapFn sBlockTap;
@@ -259,6 +261,7 @@ SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 	sSpatialRender.algorithm = algorithm;
 	sSpatialCalib = SpatialCalibFor(type);
 	sFailedPulls = 0;
+	sSpatialFailed.store(false, std::memory_order_relaxed);
 	for(int c = 0; c < kChannels; c++)
 		sSetAz[c] = sSetEl[c] = NAN;
 	return true;
@@ -324,6 +327,18 @@ CountUnderrun(void)
 }
 
 static void
+CountRouting(bool spatial, uint32_t frames)
+{
+#ifdef CA_SHELL_OFFLINE
+	if(!spatial)
+		sClassicFrames.fetch_add(frames, std::memory_order_relaxed);
+#else
+	(void)spatial;
+	(void)frames;
+#endif
+}
+
+static void
 RenderBlock(float *L, float *R, UInt32 frames)
 {
 	bool spatial = sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, frames, (float)sRate, sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? &sSpatialRender : NULL);
@@ -331,6 +346,7 @@ RenderBlock(float *L, float *R, UInt32 frames)
 	if(sBlockTap)
 		sBlockTap(sBlockTapCtx, *sMixer, spatial, sStrL, sStrR, frames);
 #endif
+	CountRouting(spatial, frames);
 	if(spatial){
 		UInt32 chunk = SpatialChunkFrames((float)sRate);
 		bool failed = false;
@@ -431,9 +447,10 @@ static void
 ClockRender(void *, uint32_t frames, double rate)
 {
 	FlushDenormals ftz;
+	SpatialRender held = { sClockSpatial.load(std::memory_order_relaxed) };
 	for(uint32_t done = 0; done < frames;){
 		uint32_t n = frames - done < (uint32_t)kMaxBlock ? frames - done : (uint32_t)kMaxBlock;
-		sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, n, (float)rate);
+		CountRouting(sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, n, (float)rate, held.algorithm >= 0 ? &held : NULL), n);
 #ifdef CA_SHELL_OFFLINE
 		if(sClockTap)
 			sClockTap(sClockTapCtx, sDryL, sDryR, sSend, sStrL, sStrR, n, rate);
@@ -747,6 +764,7 @@ SetupSpatialOrBypass(double rate)
 	DisposeUnit(&sSpatial3D);
 	int32_t type = sOutputType.load(std::memory_order_relaxed);
 	bool unavailable = OutputRoutesSpatial(type) && !SetupSpatial3D(rate, sSpatialAlgorithm, type);
+	sClockSpatial.store(sSpatial3D ? sSpatialAlgorithm : -1, std::memory_order_relaxed);
 	sSpatialFrames.store(0, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
@@ -975,6 +993,7 @@ Rebuild(int event, uint32_t eventId, const char *why)
 	RefreshDevices();
 	if(!DecideRebuild(event, sPinned, sDevices, sNumDevices, sCurrent, eventId))
 		return;
+	sClockSpatial.store(sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? sSpatialAlgorithm : -1, std::memory_order_relaxed);
 	StopOutput();
 	DeviceChoice c = ChooseDevice(sPinned, sDevices, sNumDevices, sDefaultId);
 	bool ok = c.id != kAudioObjectUnknown && OpenOutput(c.id);
@@ -987,8 +1006,10 @@ Rebuild(int event, uint32_t eventId, const char *why)
 			c.fellBack = true;
 		}
 	}
-	if(!ok)
+	if(!ok){
+		sClockSpatial.store(-1, std::memory_order_relaxed);
 		OutputFormat(sRate, sBuffer, 0, "none");
+	}
 	if(!ok && c.id != kAudioObjectUnknown && event != EVENT_RETRY)
 		ScheduleRetry();
 	{
@@ -1081,6 +1102,7 @@ ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t al
 	sMixer = new Mixer(shared);
 	sSampleTime = 0;
 	sSpatialFailed.store(false, std::memory_order_relaxed);
+	sClockSpatial.store(-1, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sRebuilds = 0;
@@ -1360,6 +1382,12 @@ uint64_t
 ShellFramesForTest(void)
 {
 	return sDrive.Frames();
+}
+
+uint64_t
+ShellClassicFramesForTest(void)
+{
+	return sClassicFrames.load(std::memory_order_relaxed);
 }
 
 static uint32_t sLastChunkSeen[kStreams];

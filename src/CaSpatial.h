@@ -304,13 +304,13 @@ VoiceDirectionAdvance(VoiceDirection &v, Direction target, int32_t algorithm, ui
 	return VoiceDirectionTarget(v, target, algorithm, rate) && VoiceDirectionStep(v, algorithm, frames, rate, gain);
 }
 
-// One target sample per device block, stepped in chunks; dirs gets each chunk's direction. With dipped set, gain covers every frame.
+// Fresh is true when the game published since the last block, so elapsed counts from the previous publish; stepped in chunks, dirs gets each chunk's direction. With dipped set, gain covers every frame.
 inline uint32_t
-VoiceDirectionBlock(VoiceDirection &v, Direction target, bool start, int32_t algorithm, uint32_t frames, float rate, Direction *dirs, float *gain, bool *dipped)
+VoiceDirectionBlock(VoiceDirection &v, Direction target, bool start, bool fresh, int32_t algorithm, uint32_t frames, float rate, Direction *dirs, float *gain, bool *dipped)
 {
 	if(start)
 		VoiceDirectionStart(v, target);
-	else
+	else if(fresh)
 		VoiceDirectionTarget(v, target, algorithm, rate);
 	uint32_t chunk = SpatialChunkFrames(rate), k = 0;
 	*dipped = false;

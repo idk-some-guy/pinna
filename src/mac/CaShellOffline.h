@@ -32,6 +32,8 @@ void ShellBufferEventForTest(uint32_t frames);
 void ShellWaitControlForTest(void);
 bool ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames);
 uint64_t ShellFramesForTest(void);
+// Frames the mixer rendered without spatial routing, on the unit or the clock.
+uint64_t ShellClassicFramesForTest(void);
 // Waits until each playing stream holds what a render of frames needs, has failed or has written its last chunk.
 bool ShellSettleStreamsForTest(uint32_t frames, int timeoutMs, double *waitedMs);
 bool ShellWaitPrefilledForTest(uint8_t stream, int timeoutMs, double *waitedMs);

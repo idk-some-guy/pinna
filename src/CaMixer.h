@@ -60,6 +60,7 @@ private:
 	Shared *mShared;
 	DipState mDip;
 	bool mRouteSpatial, mHeadSpatial;
+	uint32_t mSeenSerial;
 	float mModeGain[kMaxBlock];
 	float *mMono[kChannels];
 	float mDipGain[kMaxBlock];

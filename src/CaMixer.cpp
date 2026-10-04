@@ -11,7 +11,7 @@ Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLa
 	}
 }
 
-Mixer::Mixer(Shared *shared) : mShared(shared), mRouteSpatial(false), mHeadSpatial(false), mShelfRate(0.0f)
+Mixer::Mixer(Shared *shared) : mShared(shared), mRouteSpatial(false), mHeadSpatial(false), mSeenSerial(0), mShelfRate(0.0f)
 {
 	mDip.phase = kDipIdle;
 	mDip.frame = 0;
@@ -116,6 +116,8 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		for(int c = 0; c < kChannels; c++)
 			memset(mMono[c], 0, frames * sizeof(float));
 	uint32_t active = 0;
+	bool fresh = s.serial != mSeenSerial;
+	mSeenSerial = s.serial;
 	for(int c = 0; c < kChannels; c++){
 		bool toMono = route0 && !s.voice[c].routeBypass;
 		bool toMonoLater = route1 && !s.voice[c].routeBypass;
@@ -182,7 +184,7 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		bool dipped = false;
 		if(toMono || toMonoLater){
 			Direction target = { sn.azimuth, sn.elevation };
-			mDirChunks[c] = VoiceDirectionBlock(mDir[c], target, started || !mDirLive[c], spatial->algorithm, frames, outRate, mChunkDir[c], mDipGain, &dipped);
+			mDirChunks[c] = VoiceDirectionBlock(mDir[c], target, started || !mDirLive[c], fresh, spatial->algorithm, frames, outRate, mChunkDir[c], mDipGain, &dipped);
 			mDirLive[c] = toMonoLater;
 		}else
 			mDirLive[c] = false;
