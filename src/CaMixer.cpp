@@ -241,8 +241,10 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 				mTailLeft[c] -= m;
 			}
 			if(sending){
-				RunBiquad(shelf, mVoiceSend, n);
-				if(isfinite(shelf.z1) && isfinite(shelf.z2))
+				bool flat = (done < split ? route0 : route1) && cur->sendHF == 1.0f && shelf.z1 == 0.0f && shelf.z2 == 0.0f;
+				if(!flat)
+					RunBiquad(shelf, mVoiceSend, n);
+				if(flat || (isfinite(shelf.z1) && isfinite(shelf.z2)))
 					for(uint32_t i = 0; i < n; i++)
 						send[done + i] += mVoiceSend[i];
 				else
