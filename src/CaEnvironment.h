@@ -45,14 +45,12 @@ static const float kEnvNarrow = 12.0f;
 static const int kEnvConfirm = 2;
 static const uint32_t kEnvFadePending = 0xFFFFFFFFu;
 
-// The pair: slotA/slotB hold the place whose preset each unit carries (-1 for none); the live unit holds current.
 struct EnvState
 {
 	int current, candidate, seen;
-	float weightB;
-	int slotA, slotB;
+	float weight[NUM_ENVS], start[NUM_ENVS];
+	float alpha0, remain;
 	uint32_t fadeLeft;
-	uint32_t idleBusy;
 };
 
 inline int
@@ -121,20 +119,24 @@ EnvDecayFrames(int env, float rate)
 }
 
 inline void
+EnvSettle(EnvState &s)
+{
+	for(int k = 0; k < NUM_ENVS; k++)
+		s.weight[k] = s.start[k] = k == s.current ? 1.0f : 0.0f;
+	s.fadeLeft = 0;
+}
+
+inline void
 EnvInit(EnvState &s, int place)
 {
 	place = EnvClampPlace(place);
 	s.current = place;
 	s.candidate = place;
 	s.seen = 0;
-	s.weightB = 0.0f;
-	s.slotA = place;
-	s.slotB = -1;
-	s.fadeLeft = 0;
-	s.idleBusy = 0;
+	s.alpha0 = s.remain = 0.0f;
+	EnvSettle(s);
 }
 
-// Returns true when the idle unit was given a new place: write its preset, then the fade starts.
 inline bool
 EnvObserve(EnvState &s, int place)
 {
@@ -149,44 +151,69 @@ EnvObserve(EnvState &s, int place)
 	}
 	if(s.seen < kEnvConfirm)
 		s.seen++;
-	if(s.seen < kEnvConfirm || s.fadeLeft != 0 || s.idleBusy != 0)
+	if(s.seen < kEnvConfirm)
 		return false;
-	if(s.slotB == s.current)
-		s.slotA = place;
-	else
-		s.slotB = place;
+	float rest = 0.0f;
+	for(int k = 0; k < NUM_ENVS; k++){
+		s.start[k] = s.weight[k];
+		if(k != place)
+			rest += s.weight[k] * s.weight[k];
+	}
+	s.remain = sqrtf(rest);
+	s.alpha0 = atan2f(s.weight[place], s.remain);
 	s.current = place;
 	s.seen = 0;
-	s.fadeLeft = kEnvFadePending;
+	if(s.remain > 1e-6f)
+		s.fadeLeft = kEnvFadePending;
+	else
+		EnvSettle(s);
 	return true;
 }
 
 inline void
-EnvFadeAdvance(EnvState &s, uint32_t frames, float rate, float *weightA, float *weightB)
+EnvFadeAdvance(EnvState &s, uint32_t frames, float rate, float *weights)
 {
 	uint32_t total = EnvFrames(kEnvFadeSeconds, rate);
-	bool toB = s.slotB == s.current;
 	if(s.fadeLeft > total)
 		s.fadeLeft = total;
-	uint32_t rest = frames;
-	if(s.fadeLeft != 0){
-		uint32_t step = rest < s.fadeLeft ? rest : s.fadeLeft;
-		s.fadeLeft -= step;
-		rest -= step;
-		if(s.fadeLeft == 0)
-			s.idleBusy = EnvDecayFrames(toB ? s.slotA : s.slotB, rate);
-	}
+	uint32_t step = frames < s.fadeLeft ? frames : s.fadeLeft;
+	s.fadeLeft -= step;
 	if(s.fadeLeft == 0)
-		s.idleBusy = s.idleBusy > rest ? s.idleBusy - rest : 0;
-	float in = 1.0f, out = 0.0f;
-	if(s.fadeLeft != 0){
-		float x = (float)(total - s.fadeLeft) / (float)total * 1.57079632679f;
-		in = sinf(x);
-		out = cosf(x);
+		for(int k = 0; k < NUM_ENVS; k++)
+			s.weight[k] = k == s.current ? 1.0f : 0.0f;
+	else{
+		float x = (float)(total - s.fadeLeft) / (float)total;
+		float alpha = s.alpha0 + x * (1.57079632679f - s.alpha0);
+		float in = sinf(alpha), out = cosf(alpha) / s.remain;
+		for(int k = 0; k < NUM_ENVS; k++)
+			s.weight[k] = k == s.current ? in : s.start[k] * out;
 	}
-	*weightA = toB ? out : in;
-	*weightB = toB ? in : out;
-	s.weightB = *weightB;
+	for(int k = 0; k < NUM_ENVS; k++)
+		weights[k] = s.weight[k];
+}
+
+inline uint32_t
+EnvLongestDecayFrames(float rate)
+{
+	uint32_t longest = 1;
+	for(int k = 0; k < NUM_ENVS; k++){
+		uint32_t n = EnvDecayFrames(k, rate);
+		longest = n > longest ? n : longest;
+	}
+	return longest;
+}
+
+inline bool
+EnvPullBlock(uint32_t &hold, uint32_t spatialFrames, uint32_t frames, float rate)
+{
+	if(spatialFrames != 0){
+		hold = EnvLongestDecayFrames(rate);
+		return true;
+	}
+	if(hold == 0)
+		return false;
+	hold = hold > frames ? hold - frames : 0;
+	return true;
 }
 
 }

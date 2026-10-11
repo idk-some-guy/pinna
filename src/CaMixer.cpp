@@ -281,51 +281,75 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 }
 
 void
-EnvPair::init(int place)
+EnvBank::init(int place)
 {
 	EnvInit(mState, place);
-	mBefore = mState;
 	mSerial = 0;
-	mFresh = true;
+	mFresh = mFreshGain = true;
+	memset(mGain, 0, sizeof(mGain));
+	memset(mTarget, 0, sizeof(mTarget));
+	memset(mInc, 0, sizeof(mInc));
+	memset(mGainLeft, 0, sizeof(mGainLeft));
+	memset(mShelf, 0, sizeof(mShelf));
+	for(int u = 0; u < NUM_ENVS; u++)
+		mShelfHF[u] = -1.0f;
 }
 
-int
-EnvPair::observe(const EnvSnap &e, int *place)
+bool
+EnvBank::observe(const EnvSnap &e)
 {
 	if(!mFresh && e.serial == mSerial)
-		return -1;
+		return false;
 	mFresh = false;
 	mSerial = e.serial;
-	int idle = mState.slotB == mState.current ? 0 : 1;
-	mBefore = mState;
-	if(!EnvObserve(mState, e.place))
-		return -1;
-	*place = mState.current;
-	return idle;
+	return EnvObserve(mState, e.place);
 }
 
 void
-EnvPair::refuse(int unit)
+EnvBank::settle(void)
 {
-	mState = mBefore;
-	if(unit == 0)
-		mState.slotA = -1;
-	else
-		mState.slotB = -1;
+	EnvSettle(mState);
 }
 
 void
-EnvPair::split(const float *send, uint32_t from, uint32_t to, float *a, float *b, uint32_t frames, float rate)
+EnvBank::split(const float *send, uint32_t from, uint32_t to, const EnvSnap &e, float *const *out, uint32_t frames, float rate)
 {
-	float wa, wb;
+	for(int u = 0; u < NUM_ENVS; u++){
+		if(mFreshGain){
+			mGain[u] = mTarget[u] = e.gain[u];
+			mInc[u] = 0.0f;
+			mGainLeft[u] = 0;
+		}else if(e.gain[u] != mTarget[u]){
+			mTarget[u] = e.gain[u];
+			mInc[u] = (e.gain[u] - mGain[u]) / kOalFadeFrames;
+			mGainLeft[u] = kOalFadeFrames;
+		}
+		if(e.gainHF[u] != mShelfHF[u]){
+			HighShelf(mShelf[u], 5000.0f, rate, e.gainHF[u]);
+			mShelfHF[u] = e.gainHF[u];
+		}
+	}
+	mFreshGain = false;
+	bool live[NUM_ENVS] = {};
+	float w[NUM_ENVS];
 	for(uint32_t i = 0; i < frames;){
 		uint32_t n = mState.fadeLeft != 0 ? 1 : frames - i;
-		EnvFadeAdvance(mState, n, rate, &wa, &wb);
+		EnvFadeAdvance(mState, n, rate, w);
 		for(uint32_t end = i + n; i < end; i++){
 			bool on = i >= from && i < to;
-			a[i] = on ? send[i] * wa : 0.0f;
-			b[i] = on ? send[i] * wb : 0.0f;
+			for(int u = 0; u < NUM_ENVS; u++){
+				if(mGainLeft[u])
+					mGain[u] = --mGainLeft[u] ? mGain[u] + mInc[u] : mTarget[u];
+				float v = on ? send[i] * w[u] * mGain[u] : 0.0f;
+				out[u][i] = v;
+				live[u] = live[u] || v != 0.0f;
+			}
 		}
+	}
+	for(int u = 0; u < NUM_ENVS; u++){
+		bool ringing = mShelf[u].z1 != 0.0f || mShelf[u].z2 != 0.0f;
+		if((live[u] && mShelfHF[u] != 1.0f) || ringing)
+			RunBiquad(mShelf[u], out[u], frames);
 	}
 }
 

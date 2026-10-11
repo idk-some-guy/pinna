@@ -48,15 +48,17 @@ static Float64 sSampleTime;
 static char sDeviceName[128];
 static float sDryL[kMaxBlock], sDryR[kMaxBlock], sSend[kMaxBlock], sStrL[kMaxBlock], sStrR[kMaxBlock];
 static float sWetL[kMaxBlock], sWetR[kMaxBlock];
-static AudioUnit sEnvUnit[2];
-static EnvPair sEnvPair;
-static std::atomic<bool> sEnvOk, sEnvLogWrite, sEnvLogPulls;
+static AudioUnit sEnvUnit[NUM_ENVS];
+static EnvBank sEnvBank;
+static std::atomic<bool> sEnvOk, sEnvLogPulls;
 static std::atomic<int32_t> sEnvHeld(-1);
-static bool sEnvWriteFailing;
-static uint32_t sEnvFailedPulls;
-static float sCaveSend[kMaxBlock], sEnvSendA[kMaxBlock], sEnvSendB[kMaxBlock];
-static float sPairL[2][kMaxBlock], sPairR[2][kMaxBlock];
-static const float *sEnvFeed[2][2] = { { sEnvSendA, sEnvSendA }, { sEnvSendB, sEnvSendB } };
+static uint32_t sEnvFailedPulls, sEnvHold;
+static bool sEnvPulled[NUM_ENVS];
+static float sCaveSend[kMaxBlock], sEnvSend[NUM_ENVS][kMaxBlock];
+static float *sEnvSendPtr[NUM_ENVS] = { sEnvSend[0], sEnvSend[1], sEnvSend[2], sEnvSend[3], sEnvSend[4] };
+static float sEnvL[NUM_ENVS][kMaxBlock], sEnvR[NUM_ENVS][kMaxBlock];
+static const float *sEnvFeed[NUM_ENVS][2] = { { sEnvSend[0], sEnvSend[0] }, { sEnvSend[1], sEnvSend[1] }, { sEnvSend[2], sEnvSend[2] },
+	{ sEnvSend[3], sEnvSend[3] }, { sEnvSend[4], sEnvSend[4] } };
 static const float *sFeed[2] = { sDryL, sDryR };
 static const float *sFeed3D[2] = { sDryL, sDryR };
 static UInt32 sChunkAt;
@@ -91,16 +93,17 @@ struct FakeRetry { int64_t due; uint32_t session; };
 static std::vector<FakeRetry> sFakeRetries;
 static bool sFailSpatialOnce, sFailSpatial3DOnce;
 static std::atomic<uint32_t> sFailSpatial3DPulls;
-static bool sFailEnvOnce[2];
-static std::atomic<uint32_t> sFailEnvPulls[2];
-static std::atomic<uint32_t> sFailEnvWrites;
+static bool sFailEnvOnce[NUM_ENVS];
+static std::atomic<uint32_t> sFailEnvPulls[NUM_ENVS];
+static std::atomic<uint64_t> sEnvPullCount, sEnvPullNanos;
 static std::atomic<uint64_t> sClassicFrames;
 static ClockTapFn sClockTap;
 static void *sClockTapCtx;
 static BlockTapFn sBlockTap;
 static void *sBlockTapCtx;
-typedef void (*EnvTapFn)(void *ctx, const float *pairL, const float *pairR, const float *caveL, const float *caveR, uint32_t frames);
+typedef void (*EnvTapFn)(void *ctx, const float *envL, const float *envR, const float *caveL, const float *caveR, const float *envIn, uint32_t frames);
 static EnvTapFn sEnvTap;
+static float sTapL[kMaxBlock], sTapR[kMaxBlock], sTapIn[kMaxBlock];
 static void *sEnvTapCtx;
 #endif
 
@@ -304,7 +307,7 @@ InitReverb(AudioUnit u, double rate, const float **feed)
 	return ok && AudioUnitInitialize(u) == noErr;
 }
 
-// Only ever written to a unit with no sound in it (S4).
+// Every write restarts the unit, so a preset is written once at setup and never on the render thread.
 static bool
 ApplyEnvPreset(AudioUnit u, int place)
 {
@@ -324,19 +327,19 @@ ApplyEnvPreset(AudioUnit u, int place)
 }
 
 static void
-DisposeEnvPair(void)
+DisposeEnvBank(void)
 {
-	DisposeUnit(&sEnvUnit[0]);
-	DisposeUnit(&sEnvUnit[1]);
+	for(int u = 0; u < NUM_ENVS; u++)
+		DisposeUnit(&sEnvUnit[u]);
 	sEnvOk.store(false, std::memory_order_relaxed);
 }
 
 static void
-SetupEnvPair(double rate)
+SetupEnvBank(double rate)
 {
-	DisposeEnvPair();
+	DisposeEnvBank();
 	bool ok = true;
-	for(int u = 0; ok && u < 2; u++){
+	for(int u = 0; ok && u < NUM_ENVS; u++){
 #ifdef CA_SHELL_OFFLINE
 		if(sFailEnvOnce[u]){
 			sFailEnvOnce[u] = false;
@@ -345,18 +348,17 @@ SetupEnvPair(double rate)
 		}
 #endif
 		sEnvUnit[u] = MakeUnit(kAudioUnitType_Effect, kAudioUnitSubType_Reverb2);
-		ok = sEnvUnit[u] && InitReverb(sEnvUnit[u], rate, sEnvFeed[u]);
+		ok = sEnvUnit[u] && InitReverb(sEnvUnit[u], rate, sEnvFeed[u]) && ApplyEnvPreset(sEnvUnit[u], u);
 	}
 	int place = sEnvHeld.load(std::memory_order_relaxed);
 	if(place < 0)
 		place = sShared ? EnvClampPlace(sShared->envPlace.load(std::memory_order_relaxed)) : ENV_OPEN;
-	sEnvPair.init(place);
-	sEnvWriteFailing = false;
+	sEnvBank.init(place);
 	sEnvFailedPulls = 0;
-	ok = ok && ApplyEnvPreset(sEnvUnit[0], place);
+	sEnvHold = 0;
 	if(!ok){
-		DisposeEnvPair();
-		printf("sampman_ca: reverb pair unavailable, spatial mode has no reverb\n");
+		DisposeEnvBank();
+		printf("sampman_ca: reverb units unavailable, spatial mode has no reverb\n");
 	}
 	sEnvHeld.store(ok ? place : -1, std::memory_order_relaxed);
 	sEnvOk.store(ok, std::memory_order_relaxed);
@@ -418,41 +420,37 @@ CountRouting(bool spatial, uint32_t frames)
 }
 
 static bool
-RenderEnvPair(uint32_t from, uint32_t to, UInt32 frames)
+RenderEnvBank(uint32_t from, uint32_t to, UInt32 frames)
 {
 	if(!sEnvOk.load(std::memory_order_relaxed))
 		return false;
-	int place;
-	int unit = sEnvPair.observe(sMixer->env(), &place);
-	if(unit >= 0){
-		bool written = true;
-#ifdef CA_SHELL_OFFLINE
-		if(sFailEnvWrites.load(std::memory_order_relaxed)){
-			sFailEnvWrites.fetch_sub(1, std::memory_order_relaxed);
-			written = false;
-		}
-#endif
-		written = written && ApplyEnvPreset(sEnvUnit[unit], place);
-		if(!written){
-			sEnvPair.refuse(unit);
-			if(!sEnvWriteFailing)
-				sEnvLogWrite.store(true, std::memory_order_relaxed);
-		}
-		sEnvWriteFailing = !written;
+	sEnvBank.observe(sMixer->env());
+	sEnvHeld.store(sEnvBank.state().current, std::memory_order_relaxed);
+	if(!EnvPullBlock(sEnvHold, to > from ? to - from : 0, frames, (float)sRate)){
+		sEnvBank.settle();
+		return false;
 	}
-	sEnvHeld.store(sEnvPair.state().current, std::memory_order_relaxed);
-	sEnvPair.split(sSend, from, to, sEnvSendA, sEnvSendB, frames, (float)sRate);
+	sEnvBank.split(sSend, from, to, sMixer->env(), sEnvSendPtr, frames, (float)sRate);
 	bool pulled = true;
-	for(int u = 0; u < 2; u++){
 #ifdef CA_SHELL_OFFLINE
+	auto pullStart = std::chrono::steady_clock::now();
+#endif
+	for(int u = 0; u < NUM_ENVS; u++){
+		sEnvPulled[u] = false;
+#ifdef CA_SHELL_OFFLINE
+		sEnvPullCount.fetch_add(1, std::memory_order_relaxed);
 		if(sFailEnvPulls[u].load(std::memory_order_relaxed)){
 			sFailEnvPulls[u].fetch_sub(1, std::memory_order_relaxed);
 			pulled = false;
 			continue;
 		}
 #endif
-		pulled = PullStereo(sEnvUnit[u], sPairL[u], sPairR[u], frames) && pulled;
+		sEnvPulled[u] = PullStereo(sEnvUnit[u], sEnvL[u], sEnvR[u], frames);
+		pulled = sEnvPulled[u] && pulled;
 	}
+#ifdef CA_SHELL_OFFLINE
+	sEnvPullNanos.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - pullStart).count(), std::memory_order_relaxed);
+#endif
 	if(pulled)
 		sEnvFailedPulls = 0;
 	else{
@@ -463,7 +461,7 @@ RenderEnvPair(uint32_t from, uint32_t to, UInt32 frames)
 			sEnvLogPulls.store(true, std::memory_order_relaxed);
 		}
 	}
-	return pulled;
+	return true;
 }
 
 static void
@@ -547,12 +545,14 @@ RenderBlock(float *L, float *R, UInt32 frames)
 		else
 			CountUnderrun();
 	}
-	bool pairOk = RenderEnvPair(from, to, frames);
-	if(pairOk)
-		for(UInt32 i = 0; i < frames; i++){
-			L[i] += sPairL[0][i] + sPairL[1][i];
-			R[i] += sPairR[0][i] + sPairR[1][i];
-		}
+	bool envRan = RenderEnvBank(from, to, frames);
+	if(envRan)
+		for(int u = 0; u < NUM_ENVS; u++)
+			if(sEnvPulled[u])
+				for(UInt32 i = 0; i < frames; i++){
+					L[i] += sEnvL[u][i];
+					R[i] += sEnvR[u][i];
+				}
 #ifdef CA_SHELL_OFFLINE
 	if(sEnvTap){
 		if(!caveOk){
@@ -560,10 +560,17 @@ RenderBlock(float *L, float *R, UInt32 frames)
 			memset(sWetR, 0, frames * sizeof(float));
 		}
 		for(UInt32 i = 0; i < frames; i++){
-			sPairL[0][i] = pairOk ? sPairL[0][i] + sPairL[1][i] : 0.0f;
-			sPairR[0][i] = pairOk ? sPairR[0][i] + sPairR[1][i] : 0.0f;
+			float l = 0.0f, r = 0.0f, in = 0.0f;
+			for(int u = 0; envRan && u < NUM_ENVS; u++){
+				l += sEnvPulled[u] ? sEnvL[u][i] : 0.0f;
+				r += sEnvPulled[u] ? sEnvR[u][i] : 0.0f;
+				in += sEnvSend[u][i];
+			}
+			sTapL[i] = l;
+			sTapR[i] = r;
+			sTapIn[i] = in;
 		}
-		sEnvTap(sEnvTapCtx, sPairL[0], sPairR[0], sWetL, sWetR, frames);
+		sEnvTap(sEnvTapCtx, sTapL, sTapR, sWetL, sWetR, sTapIn, frames);
 	}
 #endif
 	for(UInt32 i = 0; i < frames; i++){
@@ -900,7 +907,7 @@ StopOutput(void)
 	DisposeUnit(&sSpatial);
 	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
-	DisposeEnvPair();
+	DisposeEnvBank();
 	sCurrent = kAudioObjectUnknown;
 }
 
@@ -927,7 +934,7 @@ SetupSpatialOrBypass(double rate)
 	if(unavailable)
 		printf("sampman_ca: spatial mixer for positioned voices unavailable, spatial mode uses classic routing\n");
 	SetupReverb(rate);
-	SetupEnvPair(rate);
+	SetupEnvBank(rate);
 	return true;
 }
 
@@ -1306,7 +1313,7 @@ ShellStop(void)
 	DisposeUnit(&sSpatial);
 	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
-	DisposeEnvPair();
+	DisposeEnvBank();
 	delete sMixer;
 	sMixer = NULL;
 	sShared = NULL;
@@ -1315,10 +1322,8 @@ ShellStop(void)
 void
 ShellService(void)
 {
-	if(sEnvLogWrite.exchange(false, std::memory_order_relaxed))
-		printf("sampman_ca: reverb pair preset write failed, the reverb stays on the last place until the next place change\n");
 	if(sEnvLogPulls.exchange(false, std::memory_order_relaxed))
-		printf("sampman_ca: reverb pair stopped after repeated failed renders, spatial mode has no reverb until the output is rebuilt\n");
+		printf("sampman_ca: reverb units stopped after repeated failed renders, spatial mode has no reverb until the output is rebuilt\n");
 }
 
 void
@@ -1432,7 +1437,7 @@ ShellRebuildOfflineForTest(double rate)
 	DisposeUnit(&sSpatial);
 	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
-	DisposeEnvPair();
+	DisposeEnvBank();
 	SetupSpatialOrBypass(rate);
 	OutputFormat(rate, sBuffer, 0, "offline");
 	std::lock_guard<std::mutex> lock(sInfoLock);
@@ -1445,7 +1450,7 @@ ShellFailPullsForTest(int unit, uint32_t blocks)
 {
 	if(unit == 1)
 		sFailSpatial3DPulls.store(blocks, std::memory_order_relaxed);
-	else if(unit == 2 || unit == 3)
+	else if(unit >= 2 && unit < 2 + NUM_ENVS)
 		sFailEnvPulls[unit - 2].store(blocks, std::memory_order_relaxed);
 	else if(sSpatial)
 		AudioUnitUninitialize(sSpatial);
@@ -1456,7 +1461,7 @@ ShellFailSpatialOnceForTest(int unit)
 {
 	if(unit == 1)
 		sFailSpatial3DOnce = true;
-	else if(unit == 2 || unit == 3)
+	else if(unit >= 2 && unit < 2 + NUM_ENVS)
 		sFailEnvOnce[unit - 2] = true;
 	else
 		sFailSpatialOnce = true;
@@ -1483,19 +1488,13 @@ ShellEnvTapForTest(EnvTapFn tap, void *ctx)
 	sEnvTapCtx = ctx;
 }
 
-void
-ShellFailEnvWritesForTest(uint32_t count)
-{
-	sFailEnvWrites.store(count, std::memory_order_relaxed);
-}
-
 static const AudioUnitParameterID kEnvParamIds[6] = { kReverb2Param_DryWetMix, kReverb2Param_Gain, kReverb2Param_MinDelayTime, kReverb2Param_MaxDelayTime,
 	kReverb2Param_DecayTimeAt0Hz, kReverb2Param_DecayTimeAtNyquist };
 
 bool
 ShellEnvParamsForTest(int unit, float out[6])
 {
-	if(unit < 0 || unit > 1 || sEnvUnit[unit] == NULL)
+	if(unit < 0 || unit >= NUM_ENVS || sEnvUnit[unit] == NULL)
 		return false;
 	for(int i = 0; i < 6; i++){
 		AudioUnitParameterValue v;
@@ -1510,21 +1509,33 @@ void
 ShellEnvPoisonForTest(int unit)
 {
 	static const float poison[6] = { 50.0f, 3.0f, 0.02f, 0.09f, 5.0f, 4.0f };
-	for(int i = 0; unit >= 0 && unit <= 1 && sEnvUnit[unit] && i < 6; i++)
+	for(int i = 0; unit >= 0 && unit < NUM_ENVS && sEnvUnit[unit] && i < 6; i++)
 		AudioUnitSetParameter(sEnvUnit[unit], kEnvParamIds[i], kAudioUnitScope_Global, 0, poison[i], 0);
+}
+
+uint64_t
+ShellEnvPullsForTest(void)
+{
+	return sEnvPullCount.load(std::memory_order_relaxed);
+}
+
+uint64_t
+ShellEnvPullNanosForTest(void)
+{
+	return sEnvPullNanos.load(std::memory_order_relaxed);
 }
 
 EnvState
 ShellEnvStateForTest(void)
 {
-	return sEnvPair.state();
+	return sEnvBank.state();
 }
 
 float
 ShellEnvDecayForTest(int unit)
 {
 	AudioUnitParameterValue v = -1.0f;
-	if(unit < 0 || unit > 1 || sEnvUnit[unit] == NULL || AudioUnitGetParameter(sEnvUnit[unit], kReverb2Param_DecayTimeAt0Hz, kAudioUnitScope_Global, 0, &v) != noErr)
+	if(unit < 0 || unit >= NUM_ENVS || sEnvUnit[unit] == NULL || AudioUnitGetParameter(sEnvUnit[unit], kReverb2Param_DecayTimeAt0Hz, kAudioUnitScope_Global, 0, &v) != noErr)
 		return -1.0f;
 	return v;
 }

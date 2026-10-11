@@ -14,8 +14,8 @@ namespace ca {
 struct EnvSnap
 {
 	int8_t place;
-	float amount;
 	uint32_t serial;
+	float gain[NUM_ENVS], gainHF[NUM_ENVS];
 };
 
 struct Snapshot
@@ -54,18 +54,21 @@ struct RouteSpan
 	uint32_t split;
 };
 
-class EnvPair
+class EnvBank
 {
 public:
 	void init(int place);
-	int observe(const EnvSnap &e, int *place);
-	void refuse(int unit);
-	void split(const float *send, uint32_t from, uint32_t to, float *a, float *b, uint32_t frames, float rate);
+	bool observe(const EnvSnap &e);
+	void settle(void);
+	void split(const float *send, uint32_t from, uint32_t to, const EnvSnap &e, float *const *out, uint32_t frames, float rate);
 	const EnvState &state(void) const { return mState; }
 private:
-	EnvState mState, mBefore;
+	EnvState mState;
 	uint32_t mSerial;
-	bool mFresh;
+	bool mFresh, mFreshGain;
+	float mGain[NUM_ENVS], mTarget[NUM_ENVS], mInc[NUM_ENVS], mShelfHF[NUM_ENVS];
+	uint32_t mGainLeft[NUM_ENVS];
+	Biquad mShelf[NUM_ENVS];
 };
 
 class Mixer
