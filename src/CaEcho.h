@@ -120,4 +120,10 @@ EchoFadeWeight(uint32_t done)
 	return 0.5f - 0.5f * cosf(3.14159265358979f * (float)done / (float)kEchoFadeFrames);
 }
 
+inline bool
+RendersEchoFor(int32_t mode, bool echoOn, bool unitOk)
+{
+	return mode == MODE_SPATIAL && echoOn && unitOk;
+}
+
 }
