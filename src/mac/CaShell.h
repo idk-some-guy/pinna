@@ -34,6 +34,7 @@ void ShellStop(void);
 void ShellService(void);
 ShellInfo ShellGetInfo(void);
 int32_t ShellOutputType(void);
+double ShellRate(void);
 void ShellSetDevice(const char *uid);
 void ShellSetSpatial(bool on);
 void ShellSetAlgorithm(int32_t algorithm);

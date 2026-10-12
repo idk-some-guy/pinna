@@ -11,8 +11,7 @@ namespace ca {
 enum
 {
 	kEchoTaps = 8,
-	kEchoFadeFrames = 2048,
-	kEchoJumpFrames = 480
+	kEchoFadeFrames = 2048
 };
 
 static const float kSpeedOfSound = 343.3f;
@@ -25,8 +24,8 @@ EchoComputeVolume(uint8_t emitting, float maxDist, float dist)
 	float minDist = maxDist / 5.0f;
 	if(minDist > dist)
 		return emitting;
-	uint8_t v = emitting * ((maxDist - minDist - (dist - minDist)) / (maxDist - minDist)) *
-		((maxDist - minDist - (dist - minDist)) / (maxDist - minDist));
+	uint8_t v = emitting * (((maxDist - minDist - (dist - minDist)) / (maxDist - minDist)) *
+		((maxDist - minDist - (dist - minDist)) / (maxDist - minDist)));
 	return v < 127 ? v : 127;
 }
 
@@ -50,16 +49,29 @@ EchoTapEligible(float d, float maxDist)
 	return (uint8_t)(d * 500.0f / 1029.0f) > 3;
 }
 
+inline uint32_t
+EchoTapVolume(uint32_t volume, float maxDist, float d)
+{
+	if(volume == 0 || volume > 255 || !EchoTapEligible(d, maxDist))
+		return 0;
+	uint8_t c = (9 * volume) >> 4;
+	if(!(EchoComputeVolume(c, maxDist / 2.0f, d) > (c >> 4)))
+		return 0;
+	return EchoComputeEmittingVolume(c, maxDist / 2.0f, d);
+}
+
+inline uint32_t
+EchoTapScaled(uint32_t volume, uint32_t scale, float maxDist, float d)
+{
+	return EchoTapVolume(volume, maxDist, d) * scale / 127;
+}
+
 inline float
 EchoTapGain(uint32_t emitting, float srcDist, float maxDist, float d)
 {
-	if(emitting == 0 || emitting > 255 || !isfinite(srcDist) || !EchoTapEligible(d, maxDist))
+	if(emitting == 0 || emitting > 255 || !isfinite(srcDist))
 		return 0.0f;
-	uint8_t v = EchoComputeVolume((uint8_t)emitting, maxDist, srcDist);
-	uint8_t c = (9 * v) >> 4;
-	if(!(EchoComputeVolume(c, maxDist / 2.0f, d) > (c >> 4)))
-		return 0.0f;
-	uint8_t faded = EchoComputeEmittingVolume(c, maxDist / 2.0f, d);
+	uint32_t faded = EchoTapVolume(EchoComputeVolume((uint8_t)emitting, maxDist, srcDist), maxDist, d);
 	return ((float)faded / (float)emitting) * OalInverseClampedGain(100.0f, maxDist / 8.0f, maxDist / 2.0f);
 }
 
@@ -92,24 +104,40 @@ EchoTapDirection(int tap, const float camRight[3], const float camForward[3], co
 
 struct EchoHead
 {
-	uint32_t current, target, fadeLeft;
+	uint32_t current, target, fadeLeft, pending;
+	bool hasPending;
 };
 
 inline void
 EchoHeadSet(EchoHead &h, uint32_t frames)
 {
-	if(frames == h.target)
-		return;
-	uint32_t diff = frames > h.target ? frames - h.target : h.target - frames;
-	if(diff > kEchoJumpFrames){
-		h.current = h.target;
-		h.target = frames;
-		h.fadeLeft = kEchoFadeFrames;
+	if(h.fadeLeft){
+		if(frames == h.target)
+			h.hasPending = false;
+		else{
+			h.pending = frames;
+			h.hasPending = true;
+		}
 		return;
 	}
+	if(frames == h.target)
+		return;
+	h.current = h.target;
 	h.target = frames;
-	if(h.fadeLeft == 0)
-		h.current = frames;
+	h.fadeLeft = kEchoFadeFrames;
+}
+
+inline void
+EchoHeadStep(EchoHead &h)
+{
+	if(h.fadeLeft == 0 || --h.fadeLeft != 0)
+		return;
+	h.current = h.target;
+	if(h.hasPending && h.pending != h.target){
+		h.target = h.pending;
+		h.fadeLeft = kEchoFadeFrames;
+	}
+	h.hasPending = false;
 }
 
 inline float
@@ -118,6 +146,28 @@ EchoFadeWeight(uint32_t done)
 	if(done >= kEchoFadeFrames)
 		return 1.0f;
 	return 0.5f - 0.5f * cosf(3.14159265358979f * (float)done / (float)kEchoFadeFrames);
+}
+
+inline const float *
+EchoFadeTable(void)
+{
+	struct Table
+	{
+		float w[kEchoFadeFrames + 1];
+		Table(void)
+		{
+			for(uint32_t i = 0; i <= kEchoFadeFrames; i++)
+				w[i] = EchoFadeWeight(i);
+		}
+	};
+	static const Table t;
+	return t.w;
+}
+
+inline float
+EchoFadeWeightAt(uint32_t done)
+{
+	return EchoFadeTable()[done < kEchoFadeFrames ? done : kEchoFadeFrames];
 }
 
 inline bool

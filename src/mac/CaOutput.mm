@@ -24,6 +24,7 @@
 namespace ca {
 
 enum { kMaxDevices = 32, kSpatial3DInputs = 53, kBypassInput = 52, kSpatialPullFailLimit = 8 };
+static_assert(kChannels + kEchoTaps == kBypassInput, "echo inputs");
 
 static Shared *sShared;
 static Mixer *sMixer;
@@ -33,7 +34,8 @@ static SpatialRender sSpatialRender = { kSpatialUseOutputType };
 static int32_t sSpatialAlgorithm = kSpatialUseOutputType;
 static int32_t sOutputPref = OUTPUT_AUTO;
 static std::atomic<int32_t> sOutputType(OUTPUT_HEADPHONES);
-static float sSetAz[kChannels], sSetEl[kChannels];
+static float sSetAz[kBypassInput], sSetEl[kBypassInput];
+static EchoLines sEcho;
 static float sSilence[kMaxBlock];
 static std::atomic<uint64_t> sSpatialFrames;
 static std::atomic<bool> sSpatialFailed;
@@ -42,6 +44,7 @@ static uint32_t sFailedPulls;
 static int32_t sHrtfStart = -1, sHrtfLater = -1;
 static uint32_t sHrtfReadings, sHrtfArms;
 static double sRate;
+static std::atomic<double> sRateNow(48000.0);
 static uint32_t sBuffer;
 static uint32_t sRebuilds;
 static Float64 sSampleTime;
@@ -96,6 +99,7 @@ static std::atomic<uint32_t> sFailSpatial3DPulls;
 static bool sFailEnvOnce[NUM_ENVS];
 static std::atomic<uint32_t> sFailEnvPulls[NUM_ENVS];
 static std::atomic<uint64_t> sEnvPullCount, sEnvPullNanos;
+static std::atomic<uint64_t> sMixNanos, sEchoNanos;
 static std::atomic<uint64_t> sClassicFrames;
 static ClockTapFn sClockTap;
 static void *sClockTapCtx;
@@ -196,7 +200,8 @@ static OSStatus
 FeedMono(void *ref, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 frames, AudioBufferList *io)
 {
 	intptr_t c = (intptr_t)ref;
-	memcpy(io->mBuffers[0].mData, c < kChannels ? sMixer->mono((int)c) + sChunkAt : sSilence, frames * sizeof(float));
+	const float *src = c < kChannels ? sMixer->mono((int)c) + sChunkAt : sEcho.live((int)c - kChannels) ? sEcho.out((int)c - kChannels) + sChunkAt : sSilence;
+	memcpy(io->mBuffers[0].mData, src, frames * sizeof(float));
 	return noErr;
 }
 
@@ -280,7 +285,7 @@ SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 	sSpatialCalib = SpatialCalibFor(type);
 	sFailedPulls = 0;
 	sSpatialFailed.store(false, std::memory_order_relaxed);
-	for(int c = 0; c < kChannels; c++)
+	for(int c = 0; c < kBypassInput; c++)
 		sSetAz[c] = sSetEl[c] = NAN;
 	return true;
 }
@@ -467,19 +472,34 @@ RenderEnvBank(uint32_t from, uint32_t to, UInt32 frames)
 static void
 RenderBlock(float *L, float *R, UInt32 frames)
 {
+#ifdef CA_SHELL_OFFLINE
+	auto mixStart = std::chrono::steady_clock::now();
+#endif
 	bool spatial = sMixer->render(sDryL, sDryR, sSend, sStrL, sStrR, frames, (float)sRate, sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? &sSpatialRender : NULL);
 #ifdef CA_SHELL_OFFLINE
+	sMixNanos.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - mixStart).count(), std::memory_order_relaxed);
 	if(sBlockTap)
 		sBlockTap(sBlockTapCtx, *sMixer, spatial, sStrL, sStrR, frames);
 #endif
 	CountRouting(spatial, frames);
+	RouteSpan route = sMixer->route();
+	uint32_t from = route.before ? 0 : route.after ? route.split : 0, to = route.after ? frames : route.before ? route.split : 0;
 	if(spatial){
+#ifdef CA_SHELL_OFFLINE
+		auto echoStart = std::chrono::steady_clock::now();
+#endif
+		sEcho.render(*sMixer, sSpatialRender.algorithm, (float)sRate, from, to, frames);
+#ifdef CA_SHELL_OFFLINE
+		sEchoNanos.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - echoStart).count(), std::memory_order_relaxed);
+#endif
 		UInt32 chunk = SpatialChunkFrames((float)sRate);
 		bool failed = false;
 		for(uint32_t k = 0; k < sMixer->chunks(); k++){
 			UInt32 at = k * chunk, n = frames - at < chunk ? frames - at : chunk;
-			for(int c = 0; c < kChannels; c++){
-				Direction d = sMixer->direction(c, k);
+			for(int c = 0; c < kBypassInput; c++){
+				if(c >= kChannels && !sEcho.live(c - kChannels))
+					continue;
+				Direction d = c < kChannels ? sMixer->direction(c, k) : sEcho.direction(c - kChannels, k);
 				if(d.azimuth != sSetAz[c]){
 					AudioUnitSetParameter(sSpatial3D, kSpatialMixerParam_Azimuth, kAudioUnitScope_Input, c, d.azimuth, 0);
 					sSetAz[c] = d.azimuth;
@@ -504,8 +524,10 @@ RenderBlock(float *L, float *R, UInt32 frames)
 				memcpy(L + at, sDryL + at, n * sizeof(float));
 				memcpy(R + at, sDryR + at, n * sizeof(float));
 				float gl = kOalPanCentre[0] / sSpatialCalib, gr = kOalPanCentre[1] / sSpatialCalib;
-				for(int c = 0; c < kChannels; c++){
-					const float *m = sMixer->mono(c) + at;
+				for(int c = 0; c < kBypassInput; c++){
+					if(c >= kChannels && !sEcho.live(c - kChannels))
+						continue;
+					const float *m = (c < kChannels ? sMixer->mono(c) : sEcho.out(c - kChannels)) + at;
 					for(UInt32 i = 0; i < n; i++){
 						L[at + i] += m[i] * gl;
 						R[at + i] += m[i] * gr;
@@ -522,6 +544,7 @@ RenderBlock(float *L, float *R, UInt32 frames)
 			sFailedPulls = 0;
 		sSpatialFrames.fetch_add(frames, std::memory_order_relaxed);
 	}else{
+		sEcho.cut();
 		AudioUnit mix = sSpatialBypass ? NULL : sSpatial;
 		if(mix == NULL || !PullStereo(mix, L, R, frames)){
 			if(mix)
@@ -530,8 +553,6 @@ RenderBlock(float *L, float *R, UInt32 frames)
 			memcpy(R, sDryR, frames * sizeof(float));
 		}
 	}
-	RouteSpan route = sMixer->route();
-	uint32_t from = route.before ? 0 : route.after ? route.split : 0, to = route.after ? frames : route.before ? route.split : 0;
 	for(UInt32 i = 0; i < frames; i++)
 		sCaveSend[i] = i >= from && i < to ? 0.0f : sSend[i];
 	bool caveOk = false;
@@ -769,6 +790,7 @@ OutputFormat(double rate, uint32_t buffer, uint32_t latency, const char *device)
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
 		sRate = rate;
+		sRateNow.store(rate, std::memory_order_relaxed);
 		sBuffer = buffer;
 		strlcpy(sDeviceName, device, sizeof(sDeviceName));
 	}
@@ -925,6 +947,8 @@ SetupSpatialOrBypass(double rate)
 	DisposeUnit(&sSpatial3D);
 	int32_t type = sOutputType.load(std::memory_order_relaxed);
 	bool unavailable = OutputRoutesSpatial(type) && !SetupSpatial3D(rate, sSpatialAlgorithm, type);
+	if(sSpatial3D == NULL || !sEcho.allocate((float)rate))
+		sEcho.release();
 	sClockSpatial.store(sSpatial3D ? sSpatialAlgorithm : -1, std::memory_order_relaxed);
 	sSpatialFrames.store(0, std::memory_order_relaxed);
 	{
@@ -1314,6 +1338,7 @@ ShellStop(void)
 	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
 	DisposeEnvBank();
+	sEcho.release();
 	delete sMixer;
 	sMixer = NULL;
 	sShared = NULL;
@@ -1523,6 +1548,18 @@ uint64_t
 ShellEnvPullNanosForTest(void)
 {
 	return sEnvPullNanos.load(std::memory_order_relaxed);
+}
+
+uint64_t
+ShellMixNanosForTest(void)
+{
+	return sMixNanos.load(std::memory_order_relaxed);
+}
+
+uint64_t
+ShellEchoNanosForTest(void)
+{
+	return sEchoNanos.load(std::memory_order_relaxed);
 }
 
 EnvState
@@ -1766,6 +1803,12 @@ int32_t
 ShellOutputType(void)
 {
 	return sOutputType.load(std::memory_order_relaxed);
+}
+
+double
+ShellRate(void)
+{
+	return sRateNow.load(std::memory_order_relaxed);
 }
 
 }

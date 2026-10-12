@@ -1,4 +1,5 @@
 #include <string.h>
+#include <new>
 #include "CaMixer.h"
 
 namespace ca {
@@ -13,6 +14,7 @@ Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLa
 
 Mixer::Mixer(Shared *shared) : mShared(shared), mRouteSpatial(false), mHeadSpatial(false), mSeenSerial(0), mShelfRate(0.0f)
 {
+	mDipping = false;
 	mDip.phase = kDipIdle;
 	mDip.frame = 0;
 	mChunks = 0;
@@ -33,12 +35,25 @@ Mixer::Mixer(Shared *shared) : mShared(shared), mRouteSpatial(false), mHeadSpati
 		mMono[c] = new float[kMaxBlock]();
 		mDirLive[c] = false;
 	}
+	memset(mEchoLive, 0, sizeof(mEchoLive));
+	memset(&mEchoSnap, 0, sizeof(mEchoSnap));
+	memset(mEchoGain, 0, sizeof(mEchoGain));
+	memset(mEchoTarget, 0, sizeof(mEchoTarget));
+	memset(mEchoInc, 0, sizeof(mEchoInc));
+	memset(mEchoLeft, 0, sizeof(mEchoLeft));
+	memset(mEchoFade, 0, sizeof(mEchoFade));
+	memset(mEchoFadeGain, 0, sizeof(mEchoFadeGain));
+	memset(mEchoFadeLeft, 0, sizeof(mEchoFadeLeft));
+	for(int t = 0; t < kEchoTaps; t++)
+		mEcho[t] = new float[kMaxBlock]();
 }
 
 Mixer::~Mixer(void)
 {
 	for(int c = 0; c < kChannels; c++)
 		delete[] mMono[c];
+	for(int t = 0; t < kEchoTaps; t++)
+		delete[] mEcho[t];
 }
 
 void
@@ -63,6 +78,7 @@ Mixer::MoveRoute(int c, const VoiceSnap &to)
 	VoiceState &st = mVoice[c];
 	st.fadeLeft = 0;
 	mTailLeft[c] = 0;
+	mEchoFadeLeft[c] = 0;
 	if(st.active){
 		st.gainL = st.targetL = to.gainL;
 		st.gainR = st.targetR = to.gainR;
@@ -75,7 +91,7 @@ bool
 Mixer::Silent(void) const
 {
 	for(int c = 0; c < kChannels; c++)
-		if(mVoice[c].active || mVoice[c].fadeLeft || mTailLeft[c])
+		if(mVoice[c].active || mVoice[c].fadeLeft || mTailLeft[c] || mEchoFadeLeft[c])
 			return false;
 	return true;
 }
@@ -86,13 +102,104 @@ RoutedSnap(const VoiceSnap &v, bool spatial, bool mono)
 	VoiceSnap r = v;
 	if(mono){
 		r.gainL = r.monoGain;
-		r.gainR = 0.0f;
+		r.gainR = 1.0f;
 	}
 	if(spatial){
 		r.send = r.envSend;
 		r.sendHF = r.envSendHF;
 	}
 	return r;
+}
+
+float *
+Mixer::EchoBus(int t, uint32_t frames)
+{
+	if(!mEchoLive[t]){
+		memset(mEcho[t], 0, frames * sizeof(float));
+		mEchoLive[t] = true;
+	}
+	return mEcho[t];
+}
+
+bool
+Mixer::EchoOn(int c) const
+{
+	for(int t = 0; t < kEchoTaps; t++)
+		if(mEchoGain[c][t] != 0.0f || mEchoTarget[c][t] != 0.0f)
+			return true;
+	return false;
+}
+
+void
+Mixer::EchoFadeCapture(int c)
+{
+	VoiceState &st = mVoice[c];
+	if(!mRouteMono[c] || st.fadeLeft == 0)
+		return;
+	if(EchoOn(c)){
+		memcpy(mEchoFade[c], st.fade[1], sizeof(mEchoFade[c]));
+		memcpy(mEchoFadeGain[c], mEchoGain[c], sizeof(mEchoFadeGain[c]));
+		mEchoFadeLeft[c] = st.fadeLeft;
+	}
+	memset(st.fade[1], 0, sizeof(st.fade[1]));
+}
+
+void
+Mixer::MixEchoFade(int c, uint32_t at, uint32_t n, uint32_t frames)
+{
+	uint32_t k = kOalFadeFrames - mEchoFadeLeft[c], m = n < mEchoFadeLeft[c] ? n : mEchoFadeLeft[c];
+	for(int t = 0; t < kEchoTaps; t++){
+		float gain = mEchoFadeGain[c][t];
+		if(gain == 0.0f)
+			continue;
+		float *bus = EchoBus(t, frames) + at;
+		for(uint32_t i = 0; i < m; i++)
+			bus[i] += mEchoFade[c][k + i] * gain;
+	}
+	mEchoFadeLeft[c] -= m;
+}
+
+void
+Mixer::EchoTargets(int c, const VoiceSnap &v, bool started)
+{
+	if(started){
+		memcpy(mEchoGain[c], v.echoGain, sizeof(mEchoGain[c]));
+		memcpy(mEchoTarget[c], v.echoGain, sizeof(mEchoTarget[c]));
+		mEchoLeft[c] = 0;
+		return;
+	}
+	if(memcmp(mEchoTarget[c], v.echoGain, sizeof(mEchoTarget[c])) == 0)
+		return;
+	for(int t = 0; t < kEchoTaps; t++){
+		mEchoTarget[c][t] = v.echoGain[t];
+		mEchoInc[c][t] = (v.echoGain[t] - mEchoGain[c][t]) / kOalFadeFrames;
+	}
+	mEchoLeft[c] = kOalFadeFrames;
+}
+
+void
+Mixer::MixEcho(int c, uint32_t at, uint32_t n, uint32_t frames)
+{
+	uint32_t left = mEchoLeft[c], ramp = left < n ? left : n;
+	for(int t = 0; t < kEchoTaps; t++){
+		float gain = mEchoGain[c][t], target = mEchoTarget[c][t], inc = mEchoInc[c][t];
+		if(gain == 0.0f && target == 0.0f)
+			continue;
+		float *bus = EchoBus(t, frames) + at;
+		uint32_t l = left, i = 0;
+		for(; i < ramp; i++){
+			float g = gain;
+			if(--l)
+				gain += inc;
+			else
+				gain = target;
+			bus[i] += mEchoIn[i] * g;
+		}
+		for(; i < n; i++)
+			bus[i] += mEchoIn[i] * gain;
+		mEchoGain[c][t] = gain;
+	}
+	mEchoLeft[c] = left - ramp;
 }
 
 bool
@@ -131,6 +238,9 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 	mRoute.after = route1;
 	mRoute.split = split;
 	mEnv = s.env;
+	mEchoSnap = s.echo;
+	mDipping = dipping;
+	memset(mEchoLive, 0, sizeof(mEchoLive));
 	bool spatialMode = (route0 && split > 0) || (route1 && split < frames);
 	uint32_t chunk = SpatialChunkFrames(outRate);
 	mChunks = spatialMode ? (frames + chunk - 1) / chunk : 0;
@@ -157,6 +267,7 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		if(sn.playId != st.playId){
 			started = true;
 			StopVoice(st, mLast[c]);
+			EchoFadeCapture(c);
 			if(toMono != mRouteMono[c])
 				SwapRoute(c);
 			StartVoice(st, sn);
@@ -178,15 +289,16 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 				st.gainR = st.targetR = sn.gainR;
 				st.incL = st.incR = 0.0f;
 			}
+			EchoFadeCapture(c);
 			SwapRoute(c);
 		}
 		if(!spatialMode)
-			mTailLeft[c] = 0;
+			mTailLeft[c] = mEchoFadeLeft[c] = 0;
 		mLast[c] = sn;
 		mDirChunks[c] = 0;
 		if(!sn.playing)
 			StopVoice(st, sn);
-		if(!st.active && !st.fadeLeft && !mTailLeft[c]){
+		if(!st.active && !st.fadeLeft && !mTailLeft[c] && !mEchoFadeLeft[c]){
 			if(moves){
 				mRouteMono[c] = toMonoLater;
 				mLast[c] = later;
@@ -196,6 +308,7 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		}
 		if(st.active)
 			active++;
+		EchoTargets(c, s.voice[c], started);
 		bool dipped = false;
 		if(toMono || toMonoLater){
 			Direction target = { sn.azimuth, sn.elevation };
@@ -206,7 +319,7 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 		Biquad &shelf = mShelf[c];
 		const VoiceSnap *cur = &sn;
 		bool mono = toMono;
-		for(uint32_t done = 0; done < frames && (st.active || st.fadeLeft || mTailLeft[c]);){
+		for(uint32_t done = 0; done < frames && (st.active || st.fadeLeft || mTailLeft[c] || mEchoFadeLeft[c]);){
 			if(switches && done == split){
 				if(moves)
 					MoveRoute(c, later);
@@ -224,7 +337,14 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 			bool sending = st.send != 0.0f || cur->send != 0.0f || st.fadeLeft != 0 || mTailLeft[c] != 0 || shelf.z1 != 0.0f || shelf.z2 != 0.0f;
 			if(sending)
 				memset(mVoiceSend, 0, n * sizeof(float));
-			bool ended = mono ? RenderVoice(st, *cur, outRate, mMono[c] + done, NULL, mVoiceSend, n) : RenderVoice(st, *cur, outRate, dryL + done, dryR + done, mVoiceSend, n);
+			bool echo = mono && EchoOn(c);
+			if(echo)
+				memset(mEchoIn, 0, n * sizeof(float));
+			bool ended = mono ? RenderVoice(st, *cur, outRate, mMono[c] + done, echo ? mEchoIn : NULL, mVoiceSend, n) : RenderVoice(st, *cur, outRate, dryL + done, dryR + done, mVoiceSend, n);
+			if(echo)
+				MixEcho(c, done, n, frames);
+			if(mEchoFadeLeft[c])
+				MixEchoFade(c, done, n, frames);
 			if(dipped && mono)
 				for(uint32_t i = 0; i < n; i++)
 					mMono[c][done + i] *= mDipGain[done + i];
@@ -271,6 +391,10 @@ Mixer::render(float *dryL, float *dryR, float *send, float *strL, float *strR, u
 			for(int c = 0; c < kChannels; c++)
 				for(uint32_t i = 0; i < frames; i++)
 					mMono[c][i] *= mModeGain[i];
+		for(int t = 0; t < kEchoTaps; t++)
+			if(mEchoLive[t])
+				for(uint32_t i = 0; i < frames; i++)
+					mEcho[t][i] *= mModeGain[i];
 	}
 	uint32_t latency = mShared->streamLatency.load(std::memory_order_relaxed);
 	for(int st = 0; st < kStreams; st++)
@@ -352,6 +476,142 @@ EnvBank::split(const float *send, uint32_t from, uint32_t to, const EnvSnap &e, 
 		bool ringing = mShelf[u].z1 != 0.0f || mShelf[u].z2 != 0.0f;
 		if((live[u] && mShelfHF[u] != 1.0f) || ringing)
 			RunBiquad(mShelf[u], out[u], frames);
+	}
+}
+
+
+static inline float
+EchoRead(const float *line, uint32_t length, uint32_t pos, uint32_t back, uint32_t written)
+{
+	if(back == 0 || back > written)
+		return 0.0f;
+	return line[pos >= back ? pos - back : pos + length - back];
+}
+
+EchoLines::EchoLines(void) : mLength(0), mSerial(0), mChunks(0)
+{
+	EchoFadeTable();
+	memset(mLine, 0, sizeof(mLine));
+	memset(mDir, 0, sizeof(mDir));
+	memset(mChunkDir, 0, sizeof(mChunkDir));
+	cut();
+}
+
+EchoLines::~EchoLines(void)
+{
+	release();
+}
+
+bool
+EchoLines::allocate(float rate)
+{
+	uint32_t length = rate > 0.0f && rate < 1e6f ? (uint32_t)ceilf(rate) + kMaxBlock : 0;
+	if(length != mLength){
+		release();
+		for(int t = 0; t < kEchoTaps && length; t++){
+			mLine[t] = new (std::nothrow) float[length];
+			if(mLine[t] == NULL){
+				release();
+				cut();
+				return false;
+			}
+		}
+		mLength = length;
+	}
+	cut();
+	return mLength != 0;
+}
+
+void
+EchoLines::release(void)
+{
+	for(int t = 0; t < kEchoTaps; t++){
+		delete[] mLine[t];
+		mLine[t] = NULL;
+	}
+	mLength = 0;
+}
+
+void
+EchoLines::cut(void)
+{
+	for(int t = 0; t < kEchoTaps; t++){
+		mWrite[t] = mFilled[t] = mQuiet[t] = 0;
+		mHead[t].current = mHead[t].target = mHead[t].fadeLeft = mHead[t].pending = 0;
+		mHead[t].hasPending = false;
+		mRestart[t] = true;
+		mLive[t] = false;
+	}
+}
+
+void
+EchoLines::render(const Mixer &m, int32_t algorithm, float rate, uint32_t from, uint32_t to, uint32_t frames)
+{
+	bool fresh = m.serial() != mSerial;
+	mSerial = m.serial();
+	mChunks = 0;
+	const EchoSnap &e = m.echoSnap();
+	const float *mode = m.modeGain();
+	uint32_t maxDelay = mLength - kMaxBlock;
+	for(int t = 0; t < kEchoTaps; t++){
+		mLive[t] = false;
+		const float *in = m.echo(t);
+		if(mLine[t] == NULL || frames > (uint32_t)kMaxBlock)
+			continue;
+		uint32_t delay = e.delayFrames[t] < maxDelay ? e.delayFrames[t] : maxDelay;
+		EchoHead &h = mHead[t];
+		if(mQuiet[t] >= mFilled[t]){
+			mWrite[t] = mFilled[t] = mQuiet[t] = 0;
+			if(delay){
+				h.current = h.target = delay;
+				h.fadeLeft = 0;
+				h.hasPending = false;
+			}
+			mRestart[t] = true;
+			if(in == NULL)
+				continue;
+		}else if(delay)
+			EchoHeadSet(h, delay);
+		float *line = mLine[t], *out = mOut[t];
+		uint32_t w = mWrite[t], base = mFilled[t];
+		uint32_t first = mLength - w < frames ? mLength - w : frames;
+		if(in){
+			memcpy(line + w, in, first * sizeof(float));
+			memcpy(line, in + first, (frames - first) * sizeof(float));
+		}else{
+			memset(line + w, 0, first * sizeof(float));
+			memset(line, 0, (frames - first) * sizeof(float));
+		}
+		for(uint32_t i = 0, pos = w; i < frames; i++, pos = pos + 1 < mLength ? pos + 1 : 0){
+			float v = EchoRead(line, mLength, pos, h.current, base + i);
+			if(h.fadeLeft){
+				float g = EchoFadeWeightAt(kEchoFadeFrames - h.fadeLeft);
+				v = v * (1.0f - g) + EchoRead(line, mLength, pos, h.target, base + i) * g;
+				EchoHeadStep(h);
+			}
+			out[i] = v;
+		}
+		mWrite[t] = (w + frames) % mLength;
+		mFilled[t] = base + frames < mLength ? base + frames : mLength;
+		uint32_t quiet = mQuiet[t] + frames;
+		for(uint32_t i = frames; in && i-- > 0;)
+			if(in[i] != 0.0f){
+				quiet = frames - 1 - i;
+				break;
+			}
+		mQuiet[t] = quiet < mLength ? quiet : mLength;
+		bool dipped = false;
+		mChunks = VoiceDirectionBlock(mDir[t], e.dir[t], mRestart[t], fresh, algorithm, frames, rate, mChunkDir[t], mGain, &dipped);
+		mRestart[t] = false;
+		for(uint32_t i = 0; i < frames; i++){
+			float g = i >= from && i < to ? 1.0f : 0.0f;
+			if(mode)
+				g *= mode[i];
+			if(dipped)
+				g *= mGain[i];
+			out[i] *= g;
+		}
+		mLive[t] = true;
 	}
 }
 

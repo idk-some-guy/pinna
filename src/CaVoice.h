@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "CaConfig.h"
 #include "CaResampler.h"
+#include "CaEcho.h"
 
 namespace ca {
 
@@ -21,6 +22,7 @@ struct VoiceSnap
 	float azimuth, elevation, monoGain;
 	uint8_t routeBypass;
 	float envSend, envSendHF;
+	float echoGain[kEchoTaps];
 };
 
 struct VoiceState
