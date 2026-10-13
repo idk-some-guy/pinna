@@ -1,6 +1,8 @@
 #pragma once
 
+#include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -16,6 +18,10 @@ struct AudioEnginePrefs
 	int32_t outputType;
 	char outputDevice[128];
 	int32_t algorithm;
+	bool reverb;
+	bool echo;
+	bool headTracking;
+	float reverbAmount;
 };
 
 extern AudioEnginePrefs gAudioEnginePrefs;
@@ -23,6 +29,10 @@ extern AudioEnginePrefs gAudioEnginePrefs;
 static const int32_t kModeUnknown = -1;
 static const int32_t kAlgorithmUnknown = -1;
 static const int32_t kDefaultMode = MODE_SPATIAL;
+static const bool kDefaultReverb = true;
+static const bool kDefaultEcho = true;
+static const bool kDefaultHeadTracking = false;
+static const float kDefaultReverbAmount = 1.0f;
 
 enum { kMaxProviders = 64 };
 
@@ -39,10 +49,7 @@ static const char *const kModeNames[NUM_MODES] = { "classic", "spatial", "reimag
 static const char *const kAlgorithmNames[2] = { "auto", "hrtfhq" };
 static_assert(kSpatialUseOutputType == 0 && kSpatialHRTFHQ == 1, "algorithm names");
 static const char *const kOutputNames[NUM_OUTPUTS] = { "auto", "headphones", "builtin", "external", "multichannel" };
-static const char *const kOutputMenuLabels[NUM_OUTPUTS] = { "AUTO (NOT USED YET)", "HEADPHONES (NOT USED YET)", "BUILT-IN (NOT USED YET)",
-	"EXTERNAL (NOT USED YET)", "MULTICHANNEL (NOT USED YET)" };
-static const char *const kOutputMenuLabelsSpatial[NUM_OUTPUTS] = { "AUTO (NEXT START)", "HEADPHONES (NEXT START)", "BUILT-IN (NEXT START)",
-	"EXTERNAL (NEXT START)", "MULTICHANNEL (NEXT START)" };
+static const char *const kOutputMenuLabels[NUM_OUTPUTS] = { "AUTO", "HEADPHONES", "BUILT-IN SPEAKERS", "EXTERNAL SPEAKERS", "MULTICHANNEL" };
 
 inline void
 PrefsDefaults(AudioEnginePrefs &p)
@@ -51,6 +58,21 @@ PrefsDefaults(AudioEnginePrefs &p)
 	p.outputType = OUTPUT_AUTO;
 	strcpy(p.outputDevice, "default");
 	p.algorithm = kSpatialUseOutputType;
+	p.reverb = kDefaultReverb;
+	p.echo = kDefaultEcho;
+	p.headTracking = kDefaultHeadTracking;
+	p.reverbAmount = kDefaultReverbAmount;
+}
+
+inline void
+PrefsRestoreDefaults(AudioEnginePrefs &p)
+{
+	AudioEnginePrefs kept = p;
+	PrefsDefaults(p);
+	p.reverb = kept.reverb;
+	p.echo = kept.echo;
+	p.headTracking = kept.headTracking;
+	p.reverbAmount = kept.reverbAmount;
 }
 
 inline const char *
@@ -114,11 +136,71 @@ ResolveMode(int32_t requested, bool *fellBack)
 }
 
 inline const char *
-OutputTypeMenuLabel(int32_t t, int32_t storedMode = gAudioEnginePrefs.mode)
+OutputTypeMenuLabel(int32_t pref, int32_t detected, char *out, size_t size)
+{
+	if(pref > OUTPUT_AUTO && pref < NUM_OUTPUTS)
+		snprintf(out, size, "%s", kOutputMenuLabels[pref]);
+	else if(detected > OUTPUT_AUTO && detected < NUM_OUTPUTS)
+		snprintf(out, size, "%s (%s)", kOutputMenuLabels[OUTPUT_AUTO], kOutputMenuLabels[detected]);
+	else
+		snprintf(out, size, "%s", kOutputMenuLabels[OUTPUT_AUTO]);
+	return out;
+}
+
+inline int32_t
+NextOutputType(int32_t type, int32_t step)
+{
+	if(type < 0 || type >= NUM_OUTPUTS)
+		type = OUTPUT_AUTO;
+	return ((type + step) % NUM_OUTPUTS + NUM_OUTPUTS) % NUM_OUTPUTS;
+}
+
+inline const char *
+AudioModeMenuLabel(int32_t stored, bool unitUnavailable)
 {
 	bool fellBack;
-	const char *const *labels = ResolveMode(storedMode, &fellBack) == MODE_SPATIAL ? kOutputMenuLabelsSpatial : kOutputMenuLabels;
-	return labels[t >= 0 && t < NUM_OUTPUTS ? t : OUTPUT_AUTO];
+	if(ResolveMode(stored, &fellBack) == MODE_CLASSIC)
+		return "CLASSIC";
+	return unitUnavailable ? "SPATIAL (UNAVAILABLE)" : "SPATIAL";
+}
+
+inline int32_t
+ToggledMode(int32_t stored)
+{
+	bool fellBack;
+	return ResolveMode(stored, &fellBack) == MODE_SPATIAL ? MODE_CLASSIC : MODE_SPATIAL;
+}
+
+inline const char *
+KeylessMenuLabel(const char *key)
+{
+	return strcmp(key, "FEA_AMD") == 0 ? "AUDIO MODE" : NULL;
+}
+
+inline bool
+OnOffFromName(const char *s, bool fallback)
+{
+	if(strcasecmp(s, "on") == 0 || strcmp(s, "1") == 0 || strcasecmp(s, "true") == 0)
+		return true;
+	if(strcasecmp(s, "off") == 0 || strcmp(s, "0") == 0 || strcasecmp(s, "false") == 0)
+		return false;
+	return fallback;
+}
+
+inline float
+ClampReverbAmount(float v)
+{
+	return !isfinite(v) ? kDefaultReverbAmount : v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+}
+
+inline float
+ReverbAmountFromText(const char *s, float fallback)
+{
+	char *end;
+	float v = strtof(s, &end);
+	if(end == s || *end != '\0' || !isfinite(v))
+		return fallback;
+	return ClampReverbAmount(v);
 }
 
 inline const char *
@@ -169,6 +251,14 @@ PrefsLoad(AudioEnginePrefs &p, int8_t *speakers, Read read)
 	read("OutputDevice", p.outputDevice, (int)sizeof(p.outputDevice));
 	if(read("SpatialAlgorithm", buf, (int)sizeof(buf)))
 		p.algorithm = AlgorithmFromName(buf, kAlgorithmUnknown);
+	if(read("Reverb", buf, (int)sizeof(buf)))
+		p.reverb = OnOffFromName(buf, kDefaultReverb);
+	if(read("Echo", buf, (int)sizeof(buf)))
+		p.echo = OnOffFromName(buf, kDefaultEcho);
+	if(read("HeadTracking", buf, (int)sizeof(buf)))
+		p.headTracking = OnOffFromName(buf, kDefaultHeadTracking);
+	if(read("ReverbAmount", buf, (int)sizeof(buf)))
+		p.reverbAmount = ReverbAmountFromText(buf, kDefaultReverbAmount);
 }
 
 template<class Store>
@@ -180,6 +270,12 @@ PrefsSave(AudioEnginePrefs &p, int8_t speakers, Store store)
 	store("OutputType", OutputTypeName(p.outputType));
 	store("OutputDevice", FollowsDefault(p.outputDevice) ? "default" : p.outputDevice);
 	store("SpatialAlgorithm", AlgorithmName(p.algorithm));
+	store("Reverb", p.reverb ? "on" : "off");
+	store("Echo", p.echo ? "on" : "off");
+	store("HeadTracking", p.headTracking ? "on" : "off");
+	char amount[16];
+	snprintf(amount, sizeof(amount), "%.3f", ClampReverbAmount(p.reverbAmount));
+	store("ReverbAmount", amount);
 }
 
 inline void

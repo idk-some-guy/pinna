@@ -40,6 +40,7 @@ void ShellSetDevice(const char *uid);
 void ShellSetSpatial(bool on);
 void ShellSetAlgorithm(int32_t algorithm);
 void ShellSetOutputPref(int32_t outputPref);
+void ShellSetHeadTracking(bool on);
 int ShellDeviceCount(void);
 bool ShellDeviceAt(int index, char *name, size_t nameSize, char *uid, size_t uidSize);
 uint32_t ShellDeviceListGeneration(void);

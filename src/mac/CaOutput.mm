@@ -37,6 +37,7 @@ static SpatialRender sSpatialRender = { kSpatialUseOutputType };
 static int32_t sSpatialAlgorithm = kSpatialUseOutputType;
 static int32_t sOutputPref = OUTPUT_AUTO;
 static std::atomic<int32_t> sOutputType(OUTPUT_HEADPHONES);
+static std::atomic<bool> sHeadTrackingWanted(false);
 static uint32_t sOutChannels = 2, sLayoutTag;
 static int sFrontL = 0, sFrontR = 1;
 static float sSetAz[kBypassInput], sSetEl[kBypassInput];
@@ -240,6 +241,15 @@ SetupSpatial(double rate)
 	return ok;
 }
 
+static void
+SetHeadTrackingProperty(bool on)
+{
+	UInt32 tracking = on ? 1 : 0;
+	OSStatus err = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerEnableHeadTracking, kAudioUnitScope_Global, 0, &tracking, sizeof(tracking));
+	if(err != noErr)
+		printf("sampman_ca: head tracking %s failed (%d)\n", on ? "on" : "off", (int)err);
+}
+
 static bool
 SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 {
@@ -296,6 +306,9 @@ SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 	if(!ok){
 		DisposeUnit(&sSpatial3D);
 		return false;
+	}
+	if(type == OUTPUT_HEADPHONES && sHeadTrackingWanted.load(std::memory_order_relaxed)){
+		SetHeadTrackingProperty(true);
 	}
 	sSpatialRender.algorithm = algorithm;
 	sSpatialCalib = SpatialCalibFor(type);
@@ -1550,6 +1563,19 @@ ShellSetAlgorithm(int32_t algorithm)
 }
 
 void
+ShellSetHeadTracking(bool on)
+{
+	sHeadTrackingWanted.store(on, std::memory_order_relaxed);
+	if(sControl == nil)
+		return;
+	dispatch_async(sControl, ^{
+		if(sStopping || sSpatial3D == NULL || sOutputType.load(std::memory_order_relaxed) != OUTPUT_HEADPHONES)
+			return;
+		SetHeadTrackingProperty(on);
+	});
+}
+
+void
 ShellSetOutputPref(int32_t outputPref)
 {
 	if(sControl == nil)
@@ -1786,6 +1812,19 @@ ShellSpatialUnitForTest(int32_t *outputType, int32_t *algorithm, float *calib)
 		if(sSpatial3D && AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatializationAlgorithm, kAudioUnitScope_Input, 0, &v, &size) == noErr)
 			*algorithm = v == kSpatializationAlgorithm_HRTFHQ ? kSpatialHRTFHQ : v == kSpatializationAlgorithm_UseOutputType ? kSpatialUseOutputType : 99;
 	});
+}
+
+int32_t
+ShellHeadTrackingForTest(void)
+{
+	EnsureControl();
+	__block int32_t value = -1;
+	dispatch_sync(sControl, ^{
+		UInt32 v = 0, size = sizeof(v);
+		if(sSpatial3D && AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerEnableHeadTracking, kAudioUnitScope_Global, 0, &v, &size) == noErr)
+			value = (int32_t)v;
+	});
+	return value;
 }
 
 void
