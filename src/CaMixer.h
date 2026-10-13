@@ -105,6 +105,7 @@ private:
 	bool EchoOn(int c) const;
 	void EchoTargets(int c, const VoiceSnap &v, bool started);
 	void EchoFadeCapture(int c);
+	void EchoReset(int c);
 	void MixEchoFade(int c, uint32_t at, uint32_t n, uint32_t frames);
 	void MixEcho(int c, uint32_t at, uint32_t n, uint32_t frames);
 	void MoveRoute(int c, const VoiceSnap &to);

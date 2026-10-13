@@ -39,6 +39,7 @@ static EchoLines sEcho;
 static float sSilence[kMaxBlock];
 static std::atomic<uint64_t> sSpatialFrames;
 static std::atomic<bool> sSpatialFailed;
+static std::atomic<bool> sEchoReady;
 static std::atomic<int32_t> sClockSpatial(-1);
 static uint32_t sFailedPulls;
 static int32_t sHrtfStart = -1, sHrtfLater = -1;
@@ -928,6 +929,7 @@ StopOutput(void)
 	DisposeUnit(&sOutput);
 	DisposeUnit(&sSpatial);
 	DisposeUnit(&sSpatial3D);
+	sEchoReady.store(false, std::memory_order_relaxed);
 	DisposeUnit(&sReverb);
 	DisposeEnvBank();
 	sCurrent = kAudioObjectUnknown;
@@ -947,8 +949,10 @@ SetupSpatialOrBypass(double rate)
 	DisposeUnit(&sSpatial3D);
 	int32_t type = sOutputType.load(std::memory_order_relaxed);
 	bool unavailable = OutputRoutesSpatial(type) && !SetupSpatial3D(rate, sSpatialAlgorithm, type);
-	if(sSpatial3D == NULL || !sEcho.allocate((float)rate))
+	bool echoReady = sSpatial3D != NULL && sEcho.allocate((float)rate);
+	if(!echoReady)
 		sEcho.release();
+	sEchoReady.store(echoReady, std::memory_order_relaxed);
 	sClockSpatial.store(sSpatial3D ? sSpatialAlgorithm : -1, std::memory_order_relaxed);
 	sSpatialFrames.store(0, std::memory_order_relaxed);
 	{
@@ -1338,6 +1342,7 @@ ShellStop(void)
 	DisposeUnit(&sSpatial3D);
 	DisposeUnit(&sReverb);
 	DisposeEnvBank();
+	sEchoReady.store(false, std::memory_order_relaxed);
 	sEcho.release();
 	delete sMixer;
 	sMixer = NULL;
@@ -1803,6 +1808,12 @@ int32_t
 ShellOutputType(void)
 {
 	return sOutputType.load(std::memory_order_relaxed);
+}
+
+bool
+ShellEchoReady(void)
+{
+	return sEchoReady.load(std::memory_order_relaxed) && !sSpatialFailed.load(std::memory_order_relaxed);
 }
 
 double

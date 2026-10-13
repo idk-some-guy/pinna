@@ -69,6 +69,8 @@ Mixer::SwapRoute(int c)
 	uint32_t left = st.fadeLeft;
 	st.fadeLeft = mTailLeft[c];
 	mTailLeft[c] = left;
+	if(mRouteMono[c])
+		EchoReset(c);
 	mRouteMono[c] = !mRouteMono[c];
 }
 
@@ -84,6 +86,8 @@ Mixer::MoveRoute(int c, const VoiceSnap &to)
 		st.gainR = st.targetR = to.gainR;
 		st.incL = st.incR = 0.0f;
 	}
+	if(mRouteMono[c])
+		EchoReset(c);
 	mRouteMono[c] = !mRouteMono[c];
 }
 
@@ -128,6 +132,15 @@ Mixer::EchoOn(int c) const
 		if(mEchoGain[c][t] != 0.0f || mEchoTarget[c][t] != 0.0f)
 			return true;
 	return false;
+}
+
+void
+Mixer::EchoReset(int c)
+{
+	memset(mEchoGain[c], 0, sizeof(mEchoGain[c]));
+	memset(mEchoTarget[c], 0, sizeof(mEchoTarget[c]));
+	memset(mEchoInc[c], 0, sizeof(mEchoInc[c]));
+	mEchoLeft[c] = 0;
 }
 
 void

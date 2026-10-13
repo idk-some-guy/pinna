@@ -171,9 +171,24 @@ EchoFadeWeightAt(uint32_t done)
 }
 
 inline bool
-RendersEchoFor(int32_t mode, bool echoOn, bool unitOk)
+RendersEchoFor(int32_t mode, bool unitOk)
 {
-	return mode == MODE_SPATIAL && echoOn && unitOk;
+	return mode == MODE_SPATIAL && unitOk;
+}
+
+struct EchoQueue
+{
+	bool flag;
+	bool copies;
+};
+
+inline EchoQueue
+EchoQueueFor(bool reflections, bool carried, bool renders)
+{
+	EchoQueue q;
+	q.flag = reflections ? renders : carried;
+	q.copies = reflections && !renders;
+	return q;
 }
 
 }
