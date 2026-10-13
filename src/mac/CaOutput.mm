@@ -23,8 +23,11 @@
 
 namespace ca {
 
-enum { kMaxDevices = 32, kSpatial3DInputs = 53, kBypassInput = 52, kSpatialPullFailLimit = 8 };
+enum { kMaxDevices = 32, kSpatial3DInputs = 53, kBypassInput = 52, kSpatialPullFailLimit = 8, kMaxOutChannels = 8 };
 static_assert(kChannels + kEchoTaps == kBypassInput, "echo inputs");
+static_assert(kLayoutStereo == kAudioChannelLayoutTag_Stereo && kLayoutMono == kAudioChannelLayoutTag_Mono && kLayoutQuadraphonic == kAudioChannelLayoutTag_Quadraphonic &&
+	kLayoutMpeg50A == kAudioChannelLayoutTag_MPEG_5_0_A && kLayoutMpeg51A == kAudioChannelLayoutTag_MPEG_5_1_A && kLayoutMpeg51D == kAudioChannelLayoutTag_MPEG_5_1_D &&
+	kLayoutMpeg61A == kAudioChannelLayoutTag_MPEG_6_1_A && kLayoutMpeg71C == kAudioChannelLayoutTag_MPEG_7_1_C, "layout tags");
 
 static Shared *sShared;
 static Mixer *sMixer;
@@ -34,6 +37,8 @@ static SpatialRender sSpatialRender = { kSpatialUseOutputType };
 static int32_t sSpatialAlgorithm = kSpatialUseOutputType;
 static int32_t sOutputPref = OUTPUT_AUTO;
 static std::atomic<int32_t> sOutputType(OUTPUT_HEADPHONES);
+static uint32_t sOutChannels = 2, sLayoutTag;
+static int sFrontL = 0, sFrontR = 1;
 static float sSetAz[kBypassInput], sSetEl[kBypassInput];
 static EchoLines sEcho;
 static float sSilence[kMaxBlock];
@@ -140,6 +145,7 @@ static const AudioObjectPropertyAddress kDeviceProps[] = {
 	{ kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
 	{ kAudioDeviceProcessorOverload, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
 	{ kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+	{ kAudioDevicePropertyPreferredChannelLayout, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain },
 };
 
 struct FlushDenormals
@@ -251,12 +257,21 @@ SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 		return false;
 	UInt32 inputs = kSpatial3DInputs, maxFrames = kMaxBlock, bypass = kSpatialMixerSourceMode_Bypass, noFlags = 0, off = 0;
 	UInt32 flags = kSpatialMixerRenderingFlags_InterAuralDelay;
+	bool multichannel = type == OUTPUT_MULTICHANNEL && sLayoutTag != 0;
+	if(multichannel)
+		algorithm = kSpatialUseOutputType;
 	UInt32 alg = algorithm == kSpatialHRTFHQ ? kSpatializationAlgorithm_HRTFHQ : kSpatializationAlgorithm_UseOutputType;
-	UInt32 outputType = type == OUTPUT_BUILTIN ? kSpatialMixerOutputType_BuiltInSpeakers : kSpatialMixerOutputType_Headphones;
-	AudioStreamBasicDescription stereo = StereoFormat(rate), mono = StereoFormat(rate, 1);
+	UInt32 outputType = type == OUTPUT_BUILTIN ? kSpatialMixerOutputType_BuiltInSpeakers : type == OUTPUT_MULTICHANNEL ? kSpatialMixerOutputType_ExternalSpeakers : kSpatialMixerOutputType_Headphones;
+	AudioStreamBasicDescription stereo = StereoFormat(rate), mono = StereoFormat(rate, 1), out = StereoFormat(rate, multichannel ? sOutChannels : 2);
 	bool ok = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_ElementCount, kAudioUnitScope_Input, 0, &inputs, sizeof(inputs)) == noErr;
 	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof(maxFrames)) == noErr;
-	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &stereo, sizeof(stereo)) == noErr;
+	ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &out, sizeof(out)) == noErr;
+	if(multichannel){
+		AudioChannelLayout layout;
+		memset(&layout, 0, sizeof(layout));
+		layout.mChannelLayoutTag = sLayoutTag;
+		ok = ok && AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output, 0, &layout, sizeof(layout)) == noErr;
+	}
 	for(UInt32 b = 0; ok && b < kBypassInput; b++){
 		AURenderCallbackStruct cb = { FeedMono, (void *)(intptr_t)b };
 		ok = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, b, &mono, sizeof(mono)) == noErr;
@@ -407,6 +422,32 @@ PullStereo(AudioUnit u, float *L, float *R, UInt32 frames, UInt32 at = 0)
 	return AudioUnitRender(u, &flags, &ts, 0, frames, &abl.list) == noErr;
 }
 
+static bool
+PullMulti(AudioUnit u, float *const *ch, UInt32 count, UInt32 frames, UInt32 at)
+{
+	AudioTimeStamp ts;
+	memset(&ts, 0, sizeof(ts));
+	ts.mSampleTime = sSampleTime + at;
+	ts.mFlags = kAudioTimeStampSampleTimeValid;
+	struct { AudioBufferList list; AudioBuffer more[kMaxOutChannels - 1]; } abl;
+	abl.list.mNumberBuffers = count;
+	for(UInt32 c = 0; c < count; c++){
+		abl.list.mBuffers[c].mNumberChannels = 1;
+		abl.list.mBuffers[c].mDataByteSize = frames * 4;
+		abl.list.mBuffers[c].mData = ch[c] + at;
+	}
+	AudioUnitRenderActionFlags flags = 0;
+	return AudioUnitRender(u, &flags, &ts, 0, frames, &abl.list) == noErr;
+}
+
+static void
+ZeroRest(float *const *out, UInt32 count, UInt32 at, UInt32 frames)
+{
+	for(UInt32 c = 0; c < count; c++)
+		if((int)c != sFrontL && (int)c != sFrontR)
+			memset(out[c] + at, 0, frames * sizeof(float));
+}
+
 static void
 CountUnderrun(void)
 {
@@ -471,7 +512,7 @@ RenderEnvBank(uint32_t from, uint32_t to, UInt32 frames)
 }
 
 static void
-RenderBlock(float *L, float *R, UInt32 frames)
+RenderBlock(float *L, float *R, UInt32 frames, float *const *out = NULL, UInt32 count = 2)
 {
 #ifdef CA_SHELL_OFFLINE
 	auto mixStart = std::chrono::steady_clock::now();
@@ -511,8 +552,8 @@ RenderBlock(float *L, float *R, UInt32 frames)
 				}
 			}
 			sChunkAt = at;
-			sFeed3D[0] = sDryL + at;
-			sFeed3D[1] = sDryR + at;
+			sFeed3D[0] = count > 2 ? sSilence : sDryL + at;
+			sFeed3D[1] = count > 2 ? sSilence : sDryR + at;
 			bool pulled = true;
 #ifdef CA_SHELL_OFFLINE
 			if(sFailSpatial3DPulls.load(std::memory_order_relaxed)){
@@ -520,8 +561,10 @@ RenderBlock(float *L, float *R, UInt32 frames)
 				pulled = false;
 			}
 #endif
-			if(!pulled || !PullStereo(sSpatial3D, L + at, R + at, n, at)){
+			if(!pulled || !(count > 2 ? PullMulti(sSpatial3D, out, count, n, at) : PullStereo(sSpatial3D, L + at, R + at, n, at))){
 				failed = true;
+				if(count > 2)
+					ZeroRest(out, count, at, n);
 				memcpy(L + at, sDryL + at, n * sizeof(float));
 				memcpy(R + at, sDryR + at, n * sizeof(float));
 				float gl = kOalPanCentre[0] / sSpatialCalib, gr = kOalPanCentre[1] / sSpatialCalib;
@@ -533,6 +576,11 @@ RenderBlock(float *L, float *R, UInt32 frames)
 						L[at + i] += m[i] * gl;
 						R[at + i] += m[i] * gr;
 					}
+				}
+			}else if(count > 2){
+				for(UInt32 i = 0; i < n; i++){
+					L[at + i] += sDryL[at + i];
+					R[at + i] += sDryR[at + i];
 				}
 			}
 		}
@@ -547,6 +595,8 @@ RenderBlock(float *L, float *R, UInt32 frames)
 	}else{
 		sEcho.cut();
 		AudioUnit mix = sSpatialBypass ? NULL : sSpatial;
+		if(count > 2)
+			ZeroRest(out, count, 0, frames);
 		if(mix == NULL || !PullStereo(mix, L, R, frames)){
 			if(mix)
 				CountUnderrun();
@@ -605,20 +655,29 @@ RenderBlock(float *L, float *R, UInt32 frames)
 static OSStatus
 OutputRender(void *, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 frames, AudioBufferList *io)
 {
-	float *L = (float *)io->mBuffers[0].mData;
-	float *R = (float *)io->mBuffers[1].mData;
+	UInt32 count = io->mNumberBuffers < (UInt32)kMaxOutChannels ? io->mNumberBuffers : (UInt32)kMaxOutChannels;
+	float *out[kMaxOutChannels];
+	for(UInt32 c = 0; c < count; c++)
+		out[c] = (float *)io->mBuffers[c].mData;
 	int e = sDrive.EnterUnit();
 	if(e != Drive::RENDER){
-		memset(L, 0, frames * sizeof(float));
-		memset(R, 0, frames * sizeof(float));
+		for(UInt32 c = 0; c < count; c++)
+			memset(out[c], 0, frames * sizeof(float));
 		if(e == Drive::BLOCKED)
 			CountUnderrun();
 		return noErr;
 	}
+	bool wide = count > 2 && count == sOutChannels;
+	float *L = out[wide ? sFrontL : 0], *R = out[wide ? sFrontR : 1];
+	for(UInt32 c = 2; !wide && c < count; c++)
+		memset(out[c], 0, frames * sizeof(float));
 	FlushDenormals ftz;
 	for(UInt32 done = 0; done < frames;){
 		UInt32 n = frames - done < (UInt32)kMaxBlock ? frames - done : (UInt32)kMaxBlock;
-		RenderBlock(L + done, R + done, n);
+		float *at[kMaxOutChannels];
+		for(UInt32 c = 0; c < count; c++)
+			at[c] = out[c] + done;
+		RenderBlock(L + done, R + done, n, at, wide ? count : 2);
 		done += n;
 	}
 	sDrive.LeaveUnit(frames);
@@ -693,6 +752,44 @@ ReadUInt32(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObjectProper
 	return v;
 }
 
+static uint32_t
+LayoutTagOf(AudioChannelLayout *layout, UInt32 size)
+{
+	uint32_t tag = layout->mChannelLayoutTag;
+	if(tag != kAudioChannelLayoutTag_UseChannelDescriptions && tag != kAudioChannelLayoutTag_UseChannelBitmap)
+		return tag;
+	UInt32 reduced = 0, out = sizeof(reduced);
+	if(AudioFormatGetProperty(kAudioFormatProperty_TagForChannelLayout, size, layout, &out, &reduced) == noErr)
+		return reduced;
+	UInt32 used = 0;
+	if(tag == kAudioChannelLayoutTag_UseChannelDescriptions)
+		for(UInt32 i = 0; i < layout->mNumberChannelDescriptions; i++)
+			used += layout->mChannelDescriptions[i].mChannelLabel != kAudioChannelLabel_Unused;
+	return used > 0 && used <= 4 ? kAudioChannelLayoutTag_Stereo : 0;
+}
+
+static bool
+MixerAcceptsLayout(uint32_t tag)
+{
+#ifdef CA_SHELL_OFFLINE
+	if(sFailSpatial3DOnce){
+		sFailSpatial3DOnce = false;
+		return false;
+	}
+#endif
+	AudioUnit unit = MakeUnit(kAudioUnitType_Mixer, kAudioUnitSubType_SpatialMixer);
+	if(unit == NULL)
+		return false;
+	AudioStreamBasicDescription out = StereoFormat(48000.0, tag & 0xFFFF);
+	AudioChannelLayout layout;
+	memset(&layout, 0, sizeof(layout));
+	layout.mChannelLayoutTag = tag;
+	bool ok = AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &out, sizeof(out)) == noErr;
+	ok = ok && AudioUnitSetProperty(unit, kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output, 0, &layout, sizeof(layout)) == noErr;
+	DisposeUnit(&unit);
+	return ok;
+}
+
 static bool
 ReadDevice(AudioObjectID dev, DeviceEntry &e)
 {
@@ -736,6 +833,14 @@ ReadDevice(AudioObjectID dev, DeviceEntry &e)
 		for(UInt32 i = 0; i < size / sizeof(AudioStreamID) && i < 16; i++)
 			terminals[count++] = ReadUInt32(streams[i], kAudioStreamPropertyTerminalType, kAudioObjectPropertyScopeGlobal);
 	e.terminal = SummariseTerminals(terminals, count);
+	AudioObjectPropertyAddress la = { kAudioDevicePropertyPreferredChannelLayout, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+	size = 0;
+	if(AudioObjectGetPropertyDataSize(dev, &la, 0, NULL, &size) == noErr && size >= sizeof(AudioChannelLayout)){
+		std::vector<uint8_t> raw(size);
+		AudioChannelLayout *layout = (AudioChannelLayout *)raw.data();
+		if(AudioObjectGetPropertyData(dev, &la, 0, NULL, &size, layout) == noErr)
+			e.layoutTag = LayoutTagOf(layout, size);
+	}
 	return true;
 }
 
@@ -851,6 +956,15 @@ CurrentChannels(AudioObjectID dev)
 	return 0;
 }
 
+static uint32_t
+CurrentLayout(AudioObjectID dev)
+{
+	for(int i = 0; i < sNumDevices; i++)
+		if(sDevices[i].id == dev)
+			return sDevices[i].layoutTag;
+	return 0;
+}
+
 static void
 DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 {
@@ -868,6 +982,7 @@ DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 			break;
 		case kAudioDevicePropertyNominalSampleRate:
 		case kAudioDevicePropertyStreamConfiguration:
+		case kAudioDevicePropertyPreferredChannelLayout:
 			format = true;
 			break;
 		case kAudioDevicePropertyDeviceIsAlive: {
@@ -891,7 +1006,7 @@ DeviceEvent(AudioObjectID dev, UInt32 n, const AudioObjectPropertyAddress *a)
 		AudioObjectGetPropertyData(dev, &kDeviceProps[0], 0, NULL, &size, &rate);
 		ReadDevice(dev, e);
 	}
-	int event = DeviceBatchEvent(gone, format, sRate, sChannels, rate, gone ? 0 : e.outputChannels);
+	int event = DeviceBatchEvent(gone, format, sRate, sChannels, rate, gone ? 0 : e.outputChannels, CurrentLayout(dev), gone ? 0 : e.layoutTag);
 	if(event != EVENT_NONE)
 		Rebuild(event, dev, gone ? "device lost" : rate != sRate ? "rate changed" : "format changed");
 }
@@ -953,7 +1068,7 @@ SetupSpatialOrBypass(double rate)
 	if(!echoReady)
 		sEcho.release();
 	sEchoReady.store(echoReady, std::memory_order_relaxed);
-	sClockSpatial.store(sSpatial3D ? sSpatialAlgorithm : -1, std::memory_order_relaxed);
+	sClockSpatial.store(sSpatial3D ? sSpatialRender.algorithm : -1, std::memory_order_relaxed);
 	sSpatialFrames.store(0, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(sInfoLock);
@@ -1086,6 +1201,50 @@ LogDevice(AudioObjectID dev, const char *name)
 }
 
 static void
+FrontPair(uint32_t tag, int *left, int *right)
+{
+	UInt32 size = 0;
+	if(AudioFormatGetPropertyInfo(kAudioFormatProperty_ChannelLayoutForTag, sizeof(tag), &tag, &size) != noErr || size < sizeof(AudioChannelLayout))
+		return;
+	std::vector<uint8_t> raw(size);
+	AudioChannelLayout *layout = (AudioChannelLayout *)raw.data();
+	if(AudioFormatGetProperty(kAudioFormatProperty_ChannelLayoutForTag, sizeof(tag), &tag, &size, layout) != noErr)
+		return;
+	int l = -1, r = -1;
+	for(UInt32 i = 0; i < layout->mNumberChannelDescriptions && i < (UInt32)kMaxOutChannels; i++){
+		if(layout->mChannelDescriptions[i].mChannelLabel == kAudioChannelLabel_Left && l < 0)
+			l = (int)i;
+		if(layout->mChannelDescriptions[i].mChannelLabel == kAudioChannelLabel_Right && r < 0)
+			r = (int)i;
+	}
+	if(l >= 0 && r >= 0){
+		*left = l;
+		*right = r;
+	}
+}
+
+static void
+ApplyOutputType(const DeviceEntry &e)
+{
+	int32_t type = EffectiveOutputType(sOutputPref, e);
+	uint32_t tag = type == OUTPUT_MULTICHANNEL ? MultichannelLayoutTag(e) : 0;
+	if(tag != 0 && !MixerAcceptsLayout(tag))
+		tag = 0;
+	if(sOutputPref == OUTPUT_MULTICHANNEL && tag == 0){
+		printf("sampman_ca: multichannel not used, %u channels, layout tag %u, %s\n", e.outputChannels, e.layoutTag,
+			e.outputChannels > 2 ? "no layout the spatial mixer supports" : "the device has two channels or fewer");
+		type = DetectOutputType(e);
+	}
+	sLayoutTag = tag;
+	sOutChannels = tag ? tag & 0xFFFF : 2;
+	sFrontL = 0;
+	sFrontR = 1;
+	if(tag)
+		FrontPair(tag, &sFrontL, &sFrontR);
+	sOutputType.store(type, std::memory_order_relaxed);
+}
+
+static void
 ResolveOutputType(AudioObjectID dev)
 {
 	DeviceEntry e;
@@ -1093,7 +1252,7 @@ ResolveOutputType(AudioObjectID dev)
 	for(int i = 0; i < sNumDevices; i++)
 		if(sDevices[i].id == dev)
 			e = sDevices[i];
-	sOutputType.store(EffectiveOutputType(sOutputPref, e), std::memory_order_relaxed);
+	ApplyOutputType(e);
 }
 
 static bool
@@ -1129,10 +1288,18 @@ OpenOutput(AudioObjectID dev)
 	AudioObjectPropertyAddress bufAddr = { kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
 	size = sizeof(buffer);
 	AudioObjectGetPropertyData(dev, &bufAddr, 0, NULL, &size, &buffer);
-	AudioStreamBasicDescription f = StereoFormat(rate);
+	AudioStreamBasicDescription f = StereoFormat(rate, sOutChannels);
 	AURenderCallbackStruct cb = { OutputRender, NULL };
 	bool ok = AudioUnitSetProperty(sOutput, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, sizeof(dev)) == noErr;
 	ok = ok && AudioUnitSetProperty(sOutput, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof(f)) == noErr;
+	if(sLayoutTag){
+		AudioChannelLayout layout;
+		memset(&layout, 0, sizeof(layout));
+		layout.mChannelLayoutTag = sLayoutTag;
+		OSStatus st = ok ? AudioUnitSetProperty(sOutput, kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Input, 0, &layout, sizeof(layout)) : noErr;
+		if(st != noErr)
+			printf("sampman_ca: output unit refused the channel layout (%d), channels follow the device order\n", (int)st);
+	}
 	ok = ok && AudioUnitSetProperty(sOutput, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof(maxFrames)) == noErr;
 	ok = ok && AudioUnitSetProperty(sOutput, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof(cb)) == noErr;
 	ok = ok && SetupSpatialOrBypass(rate);
@@ -1183,7 +1350,7 @@ Rebuild(int event, uint32_t eventId, const char *why)
 	RefreshDevices();
 	if(!DecideRebuild(event, sPinned, sDevices, sNumDevices, sCurrent, eventId))
 		return;
-	sClockSpatial.store(sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? sSpatialAlgorithm : -1, std::memory_order_relaxed);
+	sClockSpatial.store(sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? sSpatialRender.algorithm : -1, std::memory_order_relaxed);
 	StopOutput();
 	DeviceChoice c = ChooseDevice(sPinned, sDevices, sNumDevices, sDefaultId);
 	bool ok = c.id != kAudioObjectUnknown && OpenOutput(c.id);
@@ -1446,7 +1613,17 @@ ShellStartOffline(Shared *shared, double rate)
 	sSampleTime = 0;
 	sSpatialFailed.store(false, std::memory_order_relaxed);
 	sEnvHeld.store(-1, std::memory_order_relaxed);
-	sOutputType.store(sOutputPref > OUTPUT_AUTO && sOutputPref < NUM_OUTPUTS ? sOutputPref : OUTPUT_HEADPHONES, std::memory_order_relaxed);
+	sOutChannels = 2;
+	sLayoutTag = 0;
+	sFrontL = 0;
+	sFrontR = 1;
+	if(sOutputPref == OUTPUT_MULTICHANNEL){
+		DeviceEntry stereo;
+		memset(&stereo, 0, sizeof(stereo));
+		stereo.outputChannels = 2;
+		ApplyOutputType(stereo);
+	}else
+		sOutputType.store(sOutputPref > OUTPUT_AUTO && sOutputPref < NUM_OUTPUTS ? sOutputPref : OUTPUT_HEADPHONES, std::memory_order_relaxed);
 	OutputFormat(rate, 512, 0, "offline");
 	return SetupSpatialOrBypass(rate);
 }
@@ -1604,7 +1781,7 @@ ShellSpatialUnitForTest(int32_t *outputType, int32_t *algorithm, float *calib)
 		*calib = sSpatialCalib;
 		UInt32 v = 0, size = sizeof(v);
 		if(sSpatial3D && AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerOutputType, kAudioUnitScope_Global, 0, &v, &size) == noErr)
-			*outputType = v == kSpatialMixerOutputType_Headphones ? OUTPUT_HEADPHONES : v == kSpatialMixerOutputType_BuiltInSpeakers ? OUTPUT_BUILTIN : OUTPUT_EXTERNAL;
+			*outputType = v == kSpatialMixerOutputType_Headphones ? OUTPUT_HEADPHONES : v == kSpatialMixerOutputType_BuiltInSpeakers ? OUTPUT_BUILTIN : OUTPUT_MULTICHANNEL;
 		size = sizeof(v);
 		if(sSpatial3D && AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_SpatializationAlgorithm, kAudioUnitScope_Input, 0, &v, &size) == noErr)
 			*algorithm = v == kSpatializationAlgorithm_HRTFHQ ? kSpatialHRTFHQ : v == kSpatializationAlgorithm_UseOutputType ? kSpatialUseOutputType : 99;
@@ -1660,6 +1837,55 @@ ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames)
 	AudioUnitRenderActionFlags flags = 0;
 	OutputRender(NULL, &flags, NULL, 0, frames, &abl.list);
 	return sDrive.UnitBeats() != beats;
+}
+
+bool
+ShellFakeUnitPullMultiForTest(float *const *channels, uint32_t count, uint32_t frames)
+{
+	uint64_t beats = sDrive.UnitBeats();
+	struct { AudioBufferList list; AudioBuffer more[15]; } abl;
+	abl.list.mNumberBuffers = count;
+	for(uint32_t c = 0; c < count; c++){
+		abl.list.mBuffers[c].mNumberChannels = 1;
+		abl.list.mBuffers[c].mDataByteSize = frames * 4;
+		abl.list.mBuffers[c].mData = channels[c];
+	}
+	AudioUnitRenderActionFlags flags = 0;
+	OutputRender(NULL, &flags, NULL, 0, frames, &abl.list);
+	return sDrive.UnitBeats() != beats;
+}
+
+uint32_t
+ShellLayoutTagForLabelsForTest(const uint32_t *labels, uint32_t count)
+{
+	std::vector<uint8_t> raw(offsetof(AudioChannelLayout, mChannelDescriptions) + count * sizeof(AudioChannelDescription));
+	AudioChannelLayout *layout = (AudioChannelLayout *)raw.data();
+	layout->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
+	layout->mNumberChannelDescriptions = count;
+	for(uint32_t i = 0; i < count; i++){
+		memset(&layout->mChannelDescriptions[i], 0, sizeof(AudioChannelDescription));
+		layout->mChannelDescriptions[i].mChannelLabel = labels[i];
+	}
+	return LayoutTagOf(layout, (UInt32)raw.size());
+}
+
+void
+ShellMultichannelForTest(uint32_t *channels, uint32_t *layoutTag)
+{
+	EnsureControl();
+	dispatch_sync(sControl, ^{
+		*channels = *layoutTag = 0;
+		if(sSpatial3D == NULL)
+			return;
+		AudioStreamBasicDescription f;
+		UInt32 size = sizeof(f);
+		if(AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &f, &size) == noErr)
+			*channels = f.mChannelsPerFrame;
+		AudioChannelLayout layout;
+		size = sizeof(layout);
+		if(AudioUnitGetProperty(sSpatial3D, kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output, 0, &layout, &size) == noErr)
+			*layoutTag = layout.mChannelLayoutTag;
+	});
 }
 
 uint32_t

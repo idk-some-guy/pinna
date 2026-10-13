@@ -31,6 +31,10 @@ void ShellPostEventForTest(int event, uint32_t id);
 void ShellBufferEventForTest(uint32_t frames);
 void ShellWaitControlForTest(void);
 bool ShellFakeUnitPullForTest(float *L, float *R, uint32_t frames);
+bool ShellFakeUnitPullMultiForTest(float *const *channels, uint32_t count, uint32_t frames);
+// The channel count and layout tag the spatial unit's output holds, 0 with no unit.
+void ShellMultichannelForTest(uint32_t *channels, uint32_t *layoutTag);
+uint32_t ShellLayoutTagForLabelsForTest(const uint32_t *labels, uint32_t count);
 uint64_t ShellFramesForTest(void);
 // Frames the mixer rendered without spatial routing, on the unit or the clock.
 uint64_t ShellClassicFramesForTest(void);

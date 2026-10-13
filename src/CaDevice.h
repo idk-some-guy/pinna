@@ -14,6 +14,7 @@ struct DeviceEntry
 	uint32_t outputChannels;
 	bool alive;
 	uint32_t transport, terminal, dataSource;
+	uint32_t layoutTag;
 };
 
 constexpr uint32_t
@@ -63,6 +64,40 @@ EffectiveOutputType(int32_t pref, const DeviceEntry &d)
 	if(pref == OUTPUT_MULTICHANNEL)
 		return d.outputChannels > 2 ? OUTPUT_MULTICHANNEL : DetectOutputType(d);
 	return pref > OUTPUT_AUTO && pref < NUM_OUTPUTS ? pref : DetectOutputType(d);
+}
+
+static const uint32_t kLayoutMono = (100u << 16) | 1;
+static const uint32_t kLayoutStereo = (101u << 16) | 2;
+static const uint32_t kLayoutQuadraphonic = (108u << 16) | 4;
+static const uint32_t kLayoutMpeg50A = (117u << 16) | 5;
+static const uint32_t kLayoutMpeg51A = (121u << 16) | 6;
+static const uint32_t kLayoutMpeg51D = (124u << 16) | 6;
+static const uint32_t kLayoutMpeg61A = (125u << 16) | 7;
+static const uint32_t kLayoutMpeg71C = (128u << 16) | 8;
+static const uint32_t kMaxLayoutChannels = 8;
+
+inline uint32_t
+LayoutByCount(uint32_t channels)
+{
+	switch(channels){
+	case 4: return kLayoutQuadraphonic;
+	case 5: return kLayoutMpeg50A;
+	case 6: return kLayoutMpeg51A;
+	case 7: return kLayoutMpeg61A;
+	}
+	return channels >= kMaxLayoutChannels ? kLayoutMpeg71C : 0;
+}
+
+inline uint32_t
+MultichannelLayoutTag(const DeviceEntry &d)
+{
+	uint32_t tag = d.layoutTag, kind = tag >> 16, n = tag & 0xFFFF;
+	bool declared = tag != 0 && kind != 1 && kind != 147 && kind != 0xFFFE && kind != 0xFFFF;
+	if(declared && n <= 2)
+		return 0;
+	if(declared && n >= 3 && n <= kMaxLayoutChannels && n <= d.outputChannels)
+		return tag;
+	return LayoutByCount(d.outputChannels);
 }
 
 struct DeviceChoice
@@ -152,11 +187,11 @@ NeedsRebuild(int event, bool followingDefault, uint32_t currentId, uint32_t even
 }
 
 inline int
-DeviceBatchEvent(bool gone, bool formatTouched, double rate, uint32_t channels, double newRate, uint32_t newChannels)
+DeviceBatchEvent(bool gone, bool formatTouched, double rate, uint32_t channels, double newRate, uint32_t newChannels, uint32_t layout = 0, uint32_t newLayout = 0)
 {
 	if(gone)
 		return EVENT_DEVICE_GONE;
-	return formatTouched && (newRate != rate || newChannels != channels) ? EVENT_RATE_CHANGED : EVENT_NONE;
+	return formatTouched && (newRate != rate || newChannels != channels || newLayout != layout) ? EVENT_RATE_CHANGED : EVENT_NONE;
 }
 
 inline bool
