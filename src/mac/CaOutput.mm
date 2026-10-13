@@ -6,18 +6,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <chrono>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 #include "CaShell.h"
 #ifdef CA_SHELL_OFFLINE
-#include <chrono>
-#include <thread>
 #include "CaShellOffline.h"
 #endif
 #include "CaRules.h"
 #include "CaDevice.h"
 #include "CaPrefs.h"
 #include "CaDrive.h"
+#include "CaFade.h"
 #include "CaClock.h"
 #include "OalPanTable.h"
 
@@ -25,6 +27,7 @@ namespace ca {
 
 enum { kMaxDevices = 32, kSpatial3DInputs = 53, kBypassInput = 52, kSpatialPullFailLimit = 8, kMaxOutChannels = 8 };
 static_assert(kChannels + kEchoTaps == kBypassInput, "echo inputs");
+static_assert(kMaxOutChannels == kMaxLayoutChannels, "output channel limit");
 static_assert(kLayoutStereo == kAudioChannelLayoutTag_Stereo && kLayoutMono == kAudioChannelLayoutTag_Mono && kLayoutQuadraphonic == kAudioChannelLayoutTag_Quadraphonic &&
 	kLayoutMpeg50A == kAudioChannelLayoutTag_MPEG_5_0_A && kLayoutMpeg51A == kAudioChannelLayoutTag_MPEG_5_1_A && kLayoutMpeg51D == kAudioChannelLayoutTag_MPEG_5_1_D &&
 	kLayoutMpeg61A == kAudioChannelLayoutTag_MPEG_6_1_A && kLayoutMpeg71C == kAudioChannelLayoutTag_MPEG_7_1_C, "layout tags");
@@ -36,8 +39,10 @@ static bool sSpatialBypass, sSpatial3DUnavailable;
 static SpatialRender sSpatialRender = { kSpatialUseOutputType };
 static int32_t sSpatialAlgorithm = kSpatialUseOutputType;
 static int32_t sOutputPref = OUTPUT_AUTO;
-static std::atomic<int32_t> sOutputType(OUTPUT_HEADPHONES);
+static std::atomic<int32_t> sOutputType(OUTPUT_AUTO);
 static std::atomic<bool> sHeadTrackingWanted(false);
+static bool sHeadTrackingBuilt;
+static OutputFade sFade;
 static uint32_t sOutChannels = 2, sLayoutTag;
 static int sFrontL = 0, sFrontR = 1;
 static float sSetAz[kBypassInput], sSetEl[kBypassInput];
@@ -108,6 +113,10 @@ static std::atomic<uint32_t> sFailEnvPulls[NUM_ENVS];
 static std::atomic<uint64_t> sEnvPullCount, sEnvPullNanos;
 static std::atomic<uint64_t> sMixNanos, sEchoNanos;
 static std::atomic<uint64_t> sClassicFrames;
+static std::atomic<uint32_t> sConfigCalls;
+static std::atomic<uint32_t> sDeviceCalls;
+static char sConfigDevice[128];
+static uint32_t sStopQuiet, sStopTail;
 static ClockTapFn sClockTap;
 static void *sClockTapCtx;
 static BlockTapFn sBlockTap;
@@ -195,12 +204,22 @@ DisposeUnit(AudioUnit *u)
 	}
 }
 
+static void
+CopyFeed(const AudioBuffer &dst, const float *src, UInt32 frames)
+{
+	UInt32 room = kMaxBlock - sChunkAt, cap = dst.mDataByteSize / sizeof(float);
+	frames = frames < cap ? frames : cap;
+	UInt32 n = frames < room ? frames : room;
+	memcpy(dst.mData, src, n * sizeof(float));
+	memset((float *)dst.mData + n, 0, (frames - n) * sizeof(float));
+}
+
 static OSStatus
 FeedStereo(void *ref, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 frames, AudioBufferList *io)
 {
 	const float *const *src = (const float *const *)ref;
-	memcpy(io->mBuffers[0].mData, src[0], frames * sizeof(float));
-	memcpy(io->mBuffers[1].mData, src[1], frames * sizeof(float));
+	CopyFeed(io->mBuffers[0], src[0], frames);
+	CopyFeed(io->mBuffers[1], src[1], frames);
 	return noErr;
 }
 
@@ -209,7 +228,7 @@ FeedMono(void *ref, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32
 {
 	intptr_t c = (intptr_t)ref;
 	const float *src = c < kChannels ? sMixer->mono((int)c) + sChunkAt : sEcho.live((int)c - kChannels) ? sEcho.out((int)c - kChannels) + sChunkAt : sSilence;
-	memcpy(io->mBuffers[0].mData, src, frames * sizeof(float));
+	CopyFeed(io->mBuffers[0], src, frames);
 	return noErr;
 }
 
@@ -268,7 +287,7 @@ SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 	UInt32 inputs = kSpatial3DInputs, maxFrames = kMaxBlock, bypass = kSpatialMixerSourceMode_Bypass, noFlags = 0, off = 0;
 	UInt32 flags = kSpatialMixerRenderingFlags_InterAuralDelay;
 	bool multichannel = type == OUTPUT_MULTICHANNEL && sLayoutTag != 0;
-	if(multichannel)
+	if(type != OUTPUT_HEADPHONES)
 		algorithm = kSpatialUseOutputType;
 	UInt32 alg = algorithm == kSpatialHRTFHQ ? kSpatializationAlgorithm_HRTFHQ : kSpatializationAlgorithm_UseOutputType;
 	UInt32 outputType = type == OUTPUT_BUILTIN ? kSpatialMixerOutputType_BuiltInSpeakers : type == OUTPUT_MULTICHANNEL ? kSpatialMixerOutputType_ExternalSpeakers : kSpatialMixerOutputType_Headphones;
@@ -307,9 +326,9 @@ SetupSpatial3D(double rate, int32_t algorithm, int32_t type)
 		DisposeUnit(&sSpatial3D);
 		return false;
 	}
-	if(type == OUTPUT_HEADPHONES && sHeadTrackingWanted.load(std::memory_order_relaxed)){
+	sHeadTrackingBuilt = type == OUTPUT_HEADPHONES && sHeadTrackingWanted.load(std::memory_order_relaxed);
+	if(sHeadTrackingBuilt)
 		SetHeadTrackingProperty(true);
-	}
 	sSpatialRender.algorithm = algorithm;
 	sSpatialCalib = SpatialCalibFor(type);
 	sFailedPulls = 0;
@@ -672,6 +691,11 @@ OutputRender(void *, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt3
 	float *out[kMaxOutChannels];
 	for(UInt32 c = 0; c < count; c++)
 		out[c] = (float *)io->mBuffers[c].mData;
+	if(count < 2){
+		for(UInt32 c = 0; c < count; c++)
+			memset(out[c], 0, frames * sizeof(float));
+		return noErr;
+	}
 	int e = sDrive.EnterUnit();
 	if(e != Drive::RENDER){
 		for(UInt32 c = 0; c < count; c++)
@@ -693,6 +717,7 @@ OutputRender(void *, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt3
 		RenderBlock(L + done, R + done, n, at, wide ? count : 2);
 		done += n;
 	}
+	sFade.Apply(out, count, frames, sRateNow.load(std::memory_order_relaxed));
 	sDrive.LeaveUnit(frames);
 	return noErr;
 }
@@ -765,8 +790,21 @@ ReadUInt32(AudioObjectID obj, AudioObjectPropertySelector sel, AudioObjectProper
 	return v;
 }
 
+static bool
+FirstLayoutLog(const char *name)
+{
+	static std::mutex lock;
+	static std::vector<std::string> seen;
+	std::lock_guard<std::mutex> guard(lock);
+	for(const std::string &n : seen)
+		if(n == name)
+			return false;
+	seen.push_back(name);
+	return true;
+}
+
 static uint32_t
-LayoutTagOf(AudioChannelLayout *layout, UInt32 size)
+LayoutTagOf(AudioChannelLayout *layout, UInt32 size, const char *name = NULL)
 {
 	uint32_t tag = layout->mChannelLayoutTag;
 	if(tag != kAudioChannelLayoutTag_UseChannelDescriptions && tag != kAudioChannelLayoutTag_UseChannelBitmap)
@@ -778,6 +816,8 @@ LayoutTagOf(AudioChannelLayout *layout, UInt32 size)
 	if(tag == kAudioChannelLayoutTag_UseChannelDescriptions)
 		for(UInt32 i = 0; i < layout->mNumberChannelDescriptions; i++)
 			used += layout->mChannelDescriptions[i].mChannelLabel != kAudioChannelLabel_Unused;
+	if(used > 4 && name && FirstLayoutLog(name))
+		printf("sampman_ca: speaker layout of %u channels on \"%s\" has no standard tag, the channel count picks the order\n", (unsigned)used, name);
 	return used > 0 && used <= 4 ? kAudioChannelLayoutTag_Stereo : 0;
 }
 
@@ -852,7 +892,7 @@ ReadDevice(AudioObjectID dev, DeviceEntry &e)
 		std::vector<uint8_t> raw(size);
 		AudioChannelLayout *layout = (AudioChannelLayout *)raw.data();
 		if(AudioObjectGetPropertyData(dev, &la, 0, NULL, &size, layout) == noErr)
-			e.layoutTag = LayoutTagOf(layout, size);
+			e.layoutTag = LayoutTagOf(layout, size, name);
 	}
 	return true;
 }
@@ -915,6 +955,7 @@ OutputFormat(double rate, uint32_t buffer, uint32_t latency, const char *device)
 	}
 	if(sShared)
 		sShared->streamLatency.store(latency, std::memory_order_relaxed);
+	sFade.SetTail(latency > buffer ? latency - buffer : 0);
 	sClock.SetFormat(rate, ClockBlock(buffer));
 }
 
@@ -927,6 +968,7 @@ BufferSizeChanged(uint32_t buffer, uint32_t latency)
 	}
 	if(sShared)
 		sShared->streamLatency.store(latency, std::memory_order_relaxed);
+	sFade.SetTail(latency > buffer ? latency - buffer : 0);
 	sClock.SetFormat(sRate, ClockBlock(buffer));
 }
 
@@ -1044,6 +1086,18 @@ UnwatchDevice(AudioObjectID dev)
 	for(size_t i = 0; i < sizeof(kDeviceProps) / sizeof(kDeviceProps[0]); i++)
 		AudioObjectRemovePropertyListenerBlock(dev, &kDeviceProps[i], sControl, sDeviceListener);
 	sDeviceListener = nil;
+}
+
+static void
+FadeOutput(void)
+{
+	if(sDrive.Owner() != Drive::OWNER_UNIT)
+		return;
+	sFade.Close();
+	double rate = sRate > 0.0 ? sRate : 48000.0;
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds((int64_t)(1e6 * (OutputFade::kSeconds + (4.0 * sBuffer + sFade.Tail()) / rate)) + 8000);
+	while(!sFade.Closed() && std::chrono::steady_clock::now() < deadline)
+		std::this_thread::sleep_for(std::chrono::microseconds(500));
 }
 
 static void
@@ -1364,7 +1418,13 @@ Rebuild(int event, uint32_t eventId, const char *why)
 	if(!DecideRebuild(event, sPinned, sDevices, sNumDevices, sCurrent, eventId))
 		return;
 	sClockSpatial.store(sSpatial3D && !sSpatialFailed.load(std::memory_order_relaxed) ? sSpatialRender.algorithm : -1, std::memory_order_relaxed);
+	FadeOutput();
+#ifdef CA_SHELL_OFFLINE
+	sStopQuiet = sFade.Quiet();
+	sStopTail = sFade.Tail();
+#endif
 	StopOutput();
+	sFade.Restart(event != EVENT_START);
 	DeviceChoice c = ChooseDevice(sPinned, sDevices, sNumDevices, sDefaultId);
 	bool ok = c.id != kAudioObjectUnknown && OpenOutput(c.id);
 	if(!ok && c.id != kAudioObjectUnknown){
@@ -1377,6 +1437,7 @@ Rebuild(int event, uint32_t eventId, const char *why)
 		}
 	}
 	if(!ok){
+		sOutputType.store(OUTPUT_AUTO, std::memory_order_relaxed);
 		sClockSpatial.store(-1, std::memory_order_relaxed);
 		OutputFormat(sRate, sBuffer, 0, "none");
 	}
@@ -1550,47 +1611,67 @@ ShellSetSpatial(bool on)
 }
 
 void
-ShellSetAlgorithm(int32_t algorithm)
+ShellSetOutputConfig(int32_t algorithm, int32_t outputPref, int32_t headTracking, const char *device)
 {
+#ifdef CA_SHELL_OFFLINE
+	sConfigCalls.fetch_add(1, std::memory_order_relaxed);
+	strlcpy(sConfigDevice, device ? device : "keep", sizeof(sConfigDevice));
+#endif
+	if(headTracking != kKeepConfig)
+		sHeadTrackingWanted.store(headTracking != 0, std::memory_order_relaxed);
 	if(sControl == nil)
 		return;
+	struct Pin { char uid[128]; bool set; } pin;
+	pin.set = device != NULL;
+	strlcpy(pin.uid, device && device[0] ? device : "default", sizeof(pin.uid));
 	dispatch_async(sControl, ^{
-		if(sStopping || sSpatialAlgorithm == algorithm)
+		if(sStopping)
 			return;
-		sSpatialAlgorithm = algorithm;
-		Rebuild(EVENT_PIN, 0, "spatial algorithm changed");
+		bool changed = false;
+		if(pin.set && ProviderChoiceChanges(sPinned, pin.uid)){
+			strlcpy(sPinned, pin.uid, sizeof(sPinned));
+			changed = true;
+		}
+		if(algorithm != kKeepConfig && sSpatialAlgorithm != algorithm){
+			sSpatialAlgorithm = algorithm;
+			changed = true;
+		}
+		if(outputPref != kKeepConfig && sOutputPref != outputPref){
+			sOutputPref = outputPref;
+			changed = true;
+		}
+		bool tracking = sHeadTrackingWanted.load(std::memory_order_relaxed) && sOutputType.load(std::memory_order_relaxed) == OUTPUT_HEADPHONES;
+		if(sSpatial3D != NULL && tracking != sHeadTrackingBuilt)
+			changed = true;
+		if(changed)
+			Rebuild(EVENT_PIN, 0, "output configuration changed");
 	});
+}
+
+void
+ShellSetAlgorithm(int32_t algorithm)
+{
+	ShellSetOutputConfig(algorithm, kKeepConfig, kKeepConfig);
 }
 
 void
 ShellSetHeadTracking(bool on)
 {
-	sHeadTrackingWanted.store(on, std::memory_order_relaxed);
-	if(sControl == nil)
-		return;
-	dispatch_async(sControl, ^{
-		if(sStopping || sSpatial3D == NULL || sOutputType.load(std::memory_order_relaxed) != OUTPUT_HEADPHONES)
-			return;
-		SetHeadTrackingProperty(on);
-	});
+	ShellSetOutputConfig(kKeepConfig, kKeepConfig, on ? 1 : 0);
 }
 
 void
 ShellSetOutputPref(int32_t outputPref)
 {
-	if(sControl == nil)
-		return;
-	dispatch_async(sControl, ^{
-		if(sStopping || sOutputPref == outputPref)
-			return;
-		sOutputPref = outputPref;
-		Rebuild(EVENT_PIN, 0, "output type changed");
-	});
+	ShellSetOutputConfig(kKeepConfig, outputPref, kKeepConfig);
 }
 
 void
 ShellSetDevice(const char *uid)
 {
+#ifdef CA_SHELL_OFFLINE
+	sDeviceCalls.fetch_add(1, std::memory_order_relaxed);
+#endif
 	if(sControl == nil)
 		return;
 	struct Pin { char uid[128]; } pin;
@@ -1938,6 +2019,57 @@ uint64_t
 ShellFramesForTest(void)
 {
 	return sDrive.Frames();
+}
+
+void
+ShellFadeAtStopForTest(uint32_t *quiet, uint32_t *tail)
+{
+	*quiet = sStopQuiet;
+	*tail = sStopTail;
+}
+
+void
+ShellConfigDeviceForTest(char *out, size_t size)
+{
+	strlcpy(out, sConfigDevice, size);
+}
+
+uint32_t
+ShellDeviceCallsForTest(void)
+{
+	return sDeviceCalls.load(std::memory_order_relaxed);
+}
+
+uint32_t
+ShellConfigCallsForTest(void)
+{
+	return sConfigCalls.load(std::memory_order_relaxed);
+}
+
+void
+ShellFeedForTest(uint32_t chunkAt, uint32_t frames, uint32_t capacity, float *mono, float *stereoL, float *stereoR)
+{
+	UInt32 saved = sChunkAt;
+	const float *saveL = sFeed3D[0], *saveR = sFeed3D[1];
+	sChunkAt = chunkAt;
+	sFeed3D[0] = sDryL + chunkAt;
+	sFeed3D[1] = sDryR + chunkAt;
+	AudioUnitRenderActionFlags flags = 0;
+	struct { AudioBufferList list; AudioBuffer second; } abl;
+	abl.list.mNumberBuffers = 1;
+	abl.list.mBuffers[0].mNumberChannels = 1;
+	abl.list.mBuffers[0].mDataByteSize = capacity * sizeof(float);
+	abl.list.mBuffers[0].mData = mono;
+	FeedMono((void *)(intptr_t)0, &flags, NULL, 0, frames, &abl.list);
+	abl.list.mNumberBuffers = 2;
+	abl.list.mBuffers[0].mData = stereoL;
+	abl.second.mNumberChannels = 1;
+	abl.second.mDataByteSize = capacity * sizeof(float);
+	abl.second.mData = stereoR;
+	FeedStereo((void *)sFeed3D, &flags, NULL, 0, frames, &abl.list);
+	sFeed3D[0] = saveL;
+	sFeed3D[1] = saveR;
+	sChunkAt = saved;
 }
 
 uint64_t

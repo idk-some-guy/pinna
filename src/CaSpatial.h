@@ -108,6 +108,7 @@ static const float kSpatialCalibHeadphones = 0.8128f;
 static const float kSpatialCalibBuiltInSpeakers = 0.8442f;
 static const float kSpatialCalibMultichannel = 0.8424f;
 static const uint32_t kJumpRampFrames = 256;
+static const uint32_t kSpatialBaseBlock = 512;
 
 inline bool
 OutputRoutesSpatial(int32_t type)
@@ -167,7 +168,7 @@ JumpThreshold(const SpatialLimits &l, uint32_t elapsed, float rate)
 {
 	if(elapsed == 0 || !(rate > 0.0f) || !isfinite(rate))
 		return l.jumpDegrees;
-	float t = l.jumpDegrees * ((float)elapsed * 48000.0f / (512.0f * rate));
+	float t = l.jumpDegrees * ((float)elapsed * 48000.0f / ((float)kSpatialBaseBlock * rate));
 	return t < l.jumpDegrees ? l.jumpDegrees : t > l.jumpCap ? l.jumpCap : t;
 }
 
@@ -175,8 +176,8 @@ inline uint32_t
 SpatialChunkFrames(float rate)
 {
 	if(!(rate > 0.0f) || !isfinite(rate))
-		return 512;
-	float n = rate * 512.0f / 48000.0f;
+		return kSpatialBaseBlock;
+	float n = rate * (float)kSpatialBaseBlock / 48000.0f;
 	return n < 64.0f ? 64 : n > (float)kMaxBlock ? (uint32_t)kMaxBlock : (uint32_t)n;
 }
 
@@ -244,7 +245,6 @@ VoiceDirectionTarget(VoiceDirection &v, Direction target, int32_t algorithm, flo
 	return true;
 }
 
-// Returns false and leaves gain alone when every frame of the step has gain 1.
 inline bool
 VoiceDirectionStep(VoiceDirection &v, int32_t algorithm, uint32_t frames, float rate, float *gain)
 {
@@ -305,7 +305,6 @@ VoiceDirectionAdvance(VoiceDirection &v, Direction target, int32_t algorithm, ui
 	return VoiceDirectionTarget(v, target, algorithm, rate) && VoiceDirectionStep(v, algorithm, frames, rate, gain);
 }
 
-// Fresh is true when the game published since the last block, so elapsed counts from the previous publish; stepped in chunks, dirs gets each chunk's direction. With dipped set, gain covers every frame.
 inline uint32_t
 VoiceDirectionBlock(VoiceDirection &v, Direction target, bool start, bool fresh, int32_t algorithm, uint32_t frames, float rate, Direction *dirs, float *gain, bool *dipped)
 {

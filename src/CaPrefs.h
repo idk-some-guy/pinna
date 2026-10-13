@@ -138,7 +138,9 @@ ResolveMode(int32_t requested, bool *fellBack)
 inline const char *
 OutputTypeMenuLabel(int32_t pref, int32_t detected, char *out, size_t size)
 {
-	if(pref > OUTPUT_AUTO && pref < NUM_OUTPUTS)
+	if(pref == OUTPUT_MULTICHANNEL && detected > OUTPUT_AUTO && detected < NUM_OUTPUTS && detected != OUTPUT_MULTICHANNEL)
+		snprintf(out, size, "%s (%s)", kOutputMenuLabels[pref], kOutputMenuLabels[detected]);
+	else if(pref > OUTPUT_AUTO && pref < NUM_OUTPUTS)
 		snprintf(out, size, "%s", kOutputMenuLabels[pref]);
 	else if(detected > OUTPUT_AUTO && detected < NUM_OUTPUTS)
 		snprintf(out, size, "%s (%s)", kOutputMenuLabels[OUTPUT_AUTO], kOutputMenuLabels[detected]);
@@ -155,13 +157,19 @@ NextOutputType(int32_t type, int32_t step)
 	return ((type + step) % NUM_OUTPUTS + NUM_OUTPUTS) % NUM_OUTPUTS;
 }
 
+inline bool
+AudioModeOnSpeakers(int32_t outputType)
+{
+	return outputType == OUTPUT_EXTERNAL;
+}
+
 inline const char *
-AudioModeMenuLabel(int32_t stored, bool unitUnavailable)
+AudioModeMenuLabel(int32_t stored, bool unitUnavailable, bool speakers = false)
 {
 	bool fellBack;
 	if(ResolveMode(stored, &fellBack) == MODE_CLASSIC)
 		return "CLASSIC";
-	return unitUnavailable ? "SPATIAL (UNAVAILABLE)" : "SPATIAL";
+	return speakers ? "SPATIAL (SPEAKERS)" : unitUnavailable ? "SPATIAL (UNAVAILABLE)" : "SPATIAL";
 }
 
 inline int32_t

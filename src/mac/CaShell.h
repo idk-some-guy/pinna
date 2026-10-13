@@ -38,6 +38,8 @@ bool ShellEchoReady(void);
 double ShellRate(void);
 void ShellSetDevice(const char *uid);
 void ShellSetSpatial(bool on);
+static const int32_t kKeepConfig = -1;
+void ShellSetOutputConfig(int32_t algorithm, int32_t outputPref, int32_t headTracking, const char *device = NULL);
 void ShellSetAlgorithm(int32_t algorithm);
 void ShellSetOutputPref(int32_t outputPref);
 void ShellSetHeadTracking(bool on);

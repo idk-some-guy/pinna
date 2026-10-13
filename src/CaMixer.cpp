@@ -565,7 +565,7 @@ EchoLines::render(const Mixer &m, int32_t algorithm, float rate, uint32_t from, 
 	mChunks = 0;
 	const EchoSnap &e = m.echoSnap();
 	const float *mode = m.modeGain();
-	uint32_t maxDelay = mLength - kMaxBlock;
+	uint32_t maxDelay = mLength > (uint32_t)kMaxBlock ? mLength - kMaxBlock : 0;
 	for(int t = 0; t < kEchoTaps; t++){
 		mLive[t] = false;
 		const float *in = m.echo(t);
