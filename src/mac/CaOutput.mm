@@ -1383,6 +1383,19 @@ ShellSetAlgorithm(int32_t algorithm)
 }
 
 void
+ShellSetOutputPref(int32_t outputPref)
+{
+	if(sControl == nil)
+		return;
+	dispatch_async(sControl, ^{
+		if(sStopping || sOutputPref == outputPref)
+			return;
+		sOutputPref = outputPref;
+		Rebuild(EVENT_PIN, 0, "output type changed");
+	});
+}
+
+void
 ShellSetDevice(const char *uid)
 {
 	if(sControl == nil)

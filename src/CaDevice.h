@@ -49,8 +49,6 @@ DetectOutputType(const DeviceEntry &d)
 {
 	if(d.terminal == kTerminalHeadphones || (d.transport == kTransportBuiltIn && d.dataSource == kDataSourceHeadphones))
 		return OUTPUT_HEADPHONES;
-	if(d.outputChannels > 2)
-		return OUTPUT_MULTICHANNEL;
 	if(d.transport == kTransportBuiltIn && d.dataSource == kDataSourceInternalSpeaker)
 		return OUTPUT_BUILTIN;
 	bool usbOrBluetooth = d.transport == kTransportUSB || d.transport == kTransportBluetooth || d.transport == kTransportBluetoothLE;
@@ -62,6 +60,8 @@ DetectOutputType(const DeviceEntry &d)
 inline int32_t
 EffectiveOutputType(int32_t pref, const DeviceEntry &d)
 {
+	if(pref == OUTPUT_MULTICHANNEL)
+		return d.outputChannels > 2 ? OUTPUT_MULTICHANNEL : DetectOutputType(d);
 	return pref > OUTPUT_AUTO && pref < NUM_OUTPUTS ? pref : DetectOutputType(d);
 }
 
