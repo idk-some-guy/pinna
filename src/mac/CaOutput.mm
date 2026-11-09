@@ -868,7 +868,7 @@ ReadDevice(AudioObjectID dev, DeviceEntry &e)
 	}
 	char name[128];
 	ReadDeviceName(dev, name, sizeof(name));
-	MenuName(name, e.name, sizeof(e.name));
+	strlcpy(e.name, name, sizeof(e.name));
 	a.mSelector = kAudioDevicePropertyDeviceIsAlive;
 	UInt32 alive = 0;
 	size = sizeof(alive);
@@ -901,10 +901,8 @@ ReadDeviceList(DeviceEntry *out, uint32_t *defaultId)
 {
 #ifdef CA_SHELL_OFFLINE
 	if(sFake){
-		for(int i = 0; i < sFakeCount; i++){
+		for(int i = 0; i < sFakeCount; i++)
 			out[i] = sFakeList[i];
-			MenuName(sFakeList[i].name, out[i].name, sizeof(out[i].name));
-		}
 		*defaultId = sFakeDefault;
 		return sFakeCount;
 	}
@@ -1461,7 +1459,7 @@ Rebuild(int event, uint32_t eventId, const char *why)
 static void
 EnsureControl(const char *label = NULL)
 {
-	if(sControl == nil || (label && strcmp(dispatch_queue_get_label(sControl), label) != 0))
+	if(sControl == nil)
 		sControl = dispatch_queue_create(label ? label : kDefaultQueueLabel, DISPATCH_QUEUE_SERIAL);
 }
 
@@ -1517,7 +1515,8 @@ UnwatchSystem(void)
 bool
 ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t algorithm, const ShellConfig *config)
 {
-	SetLogPrefix(config ? config->logPrefix : NULL);
+	if(sMixer == NULL)
+		SetLogPrefix(config ? config->logPrefix : NULL);
 #ifdef CA_SHELL_OFFLINE
 	if(gShellOffline){
 		sOutputPref = outputPref;
@@ -1628,7 +1627,7 @@ ShellSetOutputConfig(int32_t algorithm, int32_t outputPref, int32_t headTracking
 		if(sStopping)
 			return;
 		bool changed = false;
-		if(pin.set && ProviderChoiceChanges(sPinned, pin.uid)){
+		if(pin.set && DeviceChoiceChanges(sPinned, pin.uid)){
 			strlcpy(sPinned, pin.uid, sizeof(sPinned));
 			changed = true;
 		}
@@ -2032,6 +2031,13 @@ void
 ShellQueueLabelForTest(char *out, size_t size)
 {
 	strlcpy(out, sControl ? dispatch_queue_get_label(sControl) : "", size);
+}
+
+void
+ShellDropControlForTest(void)
+{
+	if(sMixer == NULL)
+		sControl = nil;
 }
 
 void

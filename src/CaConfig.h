@@ -31,6 +31,11 @@ enum
 	kFallbackRate = 48000
 };
 
+static_assert(kChannels >= 1, "PINNA_CHANNELS must be at least 1");
+static_assert(kStreams >= 1 && kStreams <= 255, "PINNA_STREAMS must be 1 to 255, stream indices are uint8_t");
+static_assert(kPoolSlots >= 1 && kPoolSlots <= 127, "PINNA_POOL_SLOTS must be 1 to 127, pool slots are int8_t");
+static_assert(kPoolSlots > 2 * kChannels, "PINNA_POOL_SLOTS must exceed twice PINNA_CHANNELS, or a start fails once every channel holds a current and a reader slot");
+
 enum
 {
 	MODE_CLASSIC = 0,

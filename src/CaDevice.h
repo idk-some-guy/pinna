@@ -10,7 +10,7 @@ struct DeviceEntry
 {
 	uint32_t id;
 	char uid[128];
-	char name[64];
+	char name[128];
 	uint32_t outputChannels;
 	bool alive;
 	uint32_t transport, terminal, dataSource;
@@ -195,23 +195,18 @@ DeviceBatchEvent(bool gone, bool formatTouched, double rate, uint32_t channels, 
 }
 
 inline bool
+DeviceChoiceChanges(const char *pinned, const char *chosen)
+{
+	if(ca::FollowsDefault(pinned) || ca::FollowsDefault(chosen))
+		return ca::FollowsDefault(pinned) != ca::FollowsDefault(chosen);
+	return strcmp(pinned, chosen) != 0;
+}
+
+inline bool
 DecideRebuild(int event, const char *pinnedUid, const DeviceEntry *list, int count, uint32_t currentId, uint32_t eventId)
 {
 	PinState p = FindPin(pinnedUid, list, count, currentId);
 	return NeedsRebuild(event, FollowsDefault(pinnedUid), currentId, eventId, p.present, p.isCurrent);
-}
-
-inline void
-MenuName(const char *utf8, char *out, size_t size)
-{
-	size_t n = 0;
-	for(size_t i = 0; utf8[i] != '\0' && n + 1 < size; i++){
-		unsigned char ch = (unsigned char)utf8[i];
-		if(ch >= 0x80 && ch < 0xC0 && i > 0 && (unsigned char)utf8[i - 1] >= 0x80)
-			continue;
-		out[n++] = ch >= 0x80 ? '?' : ch == '~' ? ' ' : ch >= 'a' && ch <= 'z' ? (char)(ch - 'a' + 'A') : (char)ch;
-	}
-	out[n] = '\0';
 }
 
 }

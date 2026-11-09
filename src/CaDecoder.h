@@ -37,8 +37,8 @@ struct DecodeHooks
 	void *ctx;
 };
 
-// Null restores the defaults: .wav and .mp3 accepted and plain. Install before the stream worker starts.
-void SetDecodeHooks(const DecodeHooks *hooks);
+// Null restores the defaults: .wav and .mp3 accepted and plain. Refused with a logged line while a decoder is open.
+bool SetDecodeHooks(const DecodeHooks *hooks);
 
 inline bool
 HasExtension(const char *path, const char *ext)

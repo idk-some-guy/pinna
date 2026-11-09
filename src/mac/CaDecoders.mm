@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <vector>
 #include "CaShell.h"
 #ifdef CA_SHELL_OFFLINE
@@ -14,13 +15,24 @@
 
 namespace ca {
 
-struct XorReader
+struct TransformReader
 {
 	FILE *file;
 	SInt64 size;
+	void (*transform)(void *bytes, size_t n, uint64_t offset, void *ctx);
+	void *ctx;
 };
 
+static std::mutex gHooksLock;
 static DecodeHooks gHooks = { NULL, NULL, NULL };
+static int gOpenDecoders;
+
+static DecodeHooks
+HooksNow(void)
+{
+	std::lock_guard<std::mutex> lock(gHooksLock);
+	return gHooks;
+}
 
 static void
 LogOnce(std::atomic<bool> &logged, const char *line)
@@ -29,7 +41,7 @@ LogOnce(std::atomic<bool> &logged, const char *line)
 		printf("%s %s\n", LogPrefix(), line);
 }
 
-void
+bool
 SetDecodeHooks(const DecodeHooks *hooks)
 {
 	static std::atomic<bool> logged(false);
@@ -37,27 +49,36 @@ SetDecodeHooks(const DecodeHooks *hooks)
 		LogOnce(logged, "decode hooks have no describe, the defaults stay");
 		hooks = NULL;
 	}
-	gHooks = hooks ? *hooks : DecodeHooks{ NULL, NULL, NULL };
+	{
+		std::lock_guard<std::mutex> lock(gHooksLock);
+		if(gOpenDecoders == 0){
+			gHooks = hooks ? *hooks : DecodeHooks{ NULL, NULL, NULL };
+			return true;
+		}
+	}
+	printf("%s decode hooks cannot change while a decoder is open, the installed hooks stay\n", LogPrefix());
+	return false;
 }
 
 static OSStatus
-ReadXor(void *ref, SInt64 position, UInt32 request, void *buffer, UInt32 *actual)
+ReadTransformed(void *ref, SInt64 position, UInt32 request, void *buffer, UInt32 *actual)
 {
-	XorReader *x = (XorReader *)ref;
-	if(fseeko(x->file, position, SEEK_SET) != 0){
+	TransformReader *r = (TransformReader *)ref;
+	if(fseeko(r->file, position, SEEK_SET) != 0){
 		*actual = 0;
 		return kAudioFilePositionError;
 	}
-	size_t n = fread(buffer, 1, request, x->file);
-	HooksTransform(gHooks, buffer, n, (uint64_t)position);
+	size_t n = fread(buffer, 1, request, r->file);
+	if(r->transform)
+		r->transform(buffer, n, (uint64_t)position, r->ctx);
 	*actual = (UInt32)n;
 	return noErr;
 }
 
 static SInt64
-SizeXor(void *ref)
+SizeTransformed(void *ref)
 {
-	return ((XorReader *)ref)->size;
+	return ((TransformReader *)ref)->size;
 }
 
 static bool
@@ -81,21 +102,28 @@ struct Source
 {
 	bool accepted, valid, transformed;
 	const char *ext;
+	AudioFileTypeID hint;
+	void (*transform)(void *bytes, size_t n, uint64_t offset, void *ctx);
+	void *ctx;
 };
 
 static Source
-Describe(const char *path)
+Describe(const DecodeHooks &hooks, const char *path)
 {
-	static std::atomic<bool> noTransform(false), unknownType(false);
-	DecodeFormat f = HooksDescribe(gHooks, path);
+	static std::atomic<bool> noTransform(false), unknownType(false), unknownPlainType(false);
+	DecodeFormat f = HooksDescribe(hooks, path);
 	const char *dot = strrchr(path, '.');
-	Source s = { f.accepted, true, f.accepted && f.transformed, f.decodeAs ? f.decodeAs : dot ? dot + 1 : "" };
-	if(s.transformed && !gHooks.transform){
+	Source s = { f.accepted, true, f.accepted && f.transformed, f.decodeAs ? f.decodeAs : dot ? dot + 1 : "", f.decodeAs ? ContentType(f.decodeAs) : 0, hooks.transform, hooks.ctx };
+	if(s.transformed && !hooks.transform){
 		LogOnce(noTransform, "a format is described as transformed but the hooks have no transform, its files are refused");
 		s.valid = false;
 	}
 	else if(s.transformed && ContentType(s.ext) == 0){
 		LogOnce(unknownType, "a format is described as decoded as a type the engine does not know, its files are refused");
+		s.valid = false;
+	}
+	else if(s.accepted && !s.transformed && f.decodeAs && s.hint == 0){
+		LogOnce(unknownPlainType, "a plain file is described as decoded as a type the engine does not know, its files are refused");
 		s.valid = false;
 	}
 	return s;
@@ -122,31 +150,45 @@ FloatClient(AudioStreamBasicDescription *client, Float64 rate, UInt32 channels)
 }
 
 static bool
-OpenAudioFile(const char *path, const Source &src, XorReader *x, AudioFileID *file)
+OpenAudioFile(const char *path, const Source &src, TransformReader *r, AudioFileID *file)
 {
 	if(src.transformed){
-		x->file = fopen(path, "rb");
-		if(x->file == NULL)
+		r->file = fopen(path, "rb");
+		if(r->file == NULL)
 			return false;
-		if(fseeko(x->file, 0, SEEK_END) != 0 || (x->size = ftello(x->file)) < 0)
+		if(fseeko(r->file, 0, SEEK_END) != 0 || (r->size = ftello(r->file)) < 0)
 			return false;
-		return AudioFileOpenWithCallbacks(x, ReadXor, NULL, SizeXor, NULL, ContentType(src.ext), file) == noErr;
+		r->transform = src.transform;
+		r->ctx = src.ctx;
+		if(AudioFileOpenWithCallbacks(r, ReadTransformed, NULL, SizeTransformed, NULL, ContentType(src.ext), file) != noErr)
+			return false;
 	}
-	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
-	if(url == NULL)
+	else{
+		CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+		if(url == NULL)
+			return false;
+		OSStatus e = AudioFileOpenURL(url, kAudioFileReadPermission, src.hint, file);
+		CFRelease(url);
+		if(e != noErr)
+			return false;
+	}
+	UInt32 hint = src.transformed ? ContentType(src.ext) : src.hint;
+	UInt32 type = 0, size = sizeof(type);
+	if(hint != 0 && (AudioFileGetProperty(*file, kAudioFilePropertyFileFormat, &size, &type) != noErr || type != hint)){
+		AudioFileClose(*file);
+		*file = NULL;
 		return false;
-	OSStatus e = AudioFileOpenURL(url, kAudioFileReadPermission, 0, file);
-	CFRelease(url);
-	return e == noErr;
+	}
+	return true;
 }
 
 static const uint32_t kMpegDecoderDelay = 529;
 
 static bool
-ReadBytes(const char *path, XorReader *x, SInt64 position, uint8_t *buffer, UInt32 request, UInt32 *actual)
+ReadBytes(const char *path, TransformReader *r, SInt64 position, uint8_t *buffer, UInt32 request, UInt32 *actual)
 {
-	if(x->file)
-		return ReadXor(x, position, request, buffer, actual) == noErr;
+	if(r->file)
+		return ReadTransformed(r, position, request, buffer, actual) == noErr;
 	FILE *f = fopen(path, "rb");
 	if(f == NULL)
 		return false;
@@ -161,8 +203,12 @@ class AppleDecoder : public Decoder
 public:
 	AppleDecoder(void) : mFile(NULL), mExt(NULL), mRate(0), mChannels(0), mLength(0), mDelay(0), mPos(0), mPad(0), mQuantum(1)
 	{
-		mXor.file = NULL;
-		mXor.size = 0;
+		mReader.file = NULL;
+		mReader.size = 0;
+		mReader.transform = NULL;
+		mReader.ctx = NULL;
+		std::lock_guard<std::mutex> lock(gHooksLock);
+		gOpenDecoders++;
 	}
 	~AppleDecoder(void)
 	{
@@ -170,13 +216,14 @@ public:
 			ExtAudioFileDispose(mExt);
 		if(mFile)
 			AudioFileClose(mFile);
-		if(mXor.file)
-			fclose(mXor.file);
+		if(mReader.file)
+			fclose(mReader.file);
+		std::lock_guard<std::mutex> lock(gHooksLock);
+		gOpenDecoders--;
 	}
-	bool open(const char *path, bool corrections)
+	bool open(const char *path, bool corrections, const Source &src)
 	{
-		Source src = Describe(path);
-		if(!src.valid || !OpenAudioFile(path, src, &mXor, &mFile) || ExtAudioFileWrapAudioFileID(mFile, false, &mExt) != noErr)
+		if(!src.valid || !OpenAudioFile(path, src, &mReader, &mFile) || ExtAudioFileWrapAudioFileID(mFile, false, &mExt) != noErr)
 			return false;
 		AudioStreamBasicDescription file;
 		UInt32 size = sizeof(file);
@@ -262,11 +309,11 @@ private:
 		uint8_t head[4096];
 		UInt32 n = 0;
 		uint32_t frames = 0, samplesPerFrame = 0;
-		if(ReadBytes(path, &mXor, 0, head, 10, &n) && ReadBytes(path, &mXor, Id3Size(head, n), head, sizeof(head), &n) &&
+		if(ReadBytes(path, &mReader, 0, head, 10, &n) && ReadBytes(path, &mReader, Id3Size(head, n), head, sizeof(head), &n) &&
 		   MpegInfoFrames(head, n, &frames, &samplesPerFrame))
 			mLength = MpegCappedLength(mLength, MpegTrimmedFrames(frames, samplesPerFrame, table.mPrimingFrames, table.mRemainderFrames), samplesPerFrame);
 	}
-	XorReader mXor;
+	TransformReader mReader;
 	AudioFileID mFile;
 	ExtAudioFileRef mExt;
 	uint32_t mRate, mChannels;
@@ -275,10 +322,10 @@ private:
 };
 
 static Decoder *
-OpenApple(const char *path, bool corrections)
+OpenApple(const char *path, bool corrections, const Source &src)
 {
 	AppleDecoder *d = new AppleDecoder();
-	if(!d->open(path, corrections)){
+	if(!d->open(path, corrections, src)){
 		delete d;
 		return NULL;
 	}
@@ -288,8 +335,9 @@ OpenApple(const char *path, bool corrections)
 Decoder *
 OpenDecoder(const char *path)
 {
-	if(IsAccepted(Describe(path)))
-		return OpenApple(path, true);
+	Source src = Describe(HooksNow(), path);
+	if(IsAccepted(src))
+		return OpenApple(path, true, src);
 	return NULL;
 }
 
@@ -305,7 +353,7 @@ UserTrackProbesForTest(void)
 Decoder *
 OpenAppleDecoderForTest(const char *path, bool corrections)
 {
-	return OpenApple(path, corrections);
+	return OpenApple(path, corrections, Describe(HooksNow(), path));
 }
 #endif
 
@@ -329,7 +377,7 @@ Verdict(bool *definitive, bool fromFile, uint32_t ms)
 uint32_t
 ProbeUserTrackMs(const char *path, bool *definitive)
 {
-	Source src = Describe(path);
+	Source src = Describe(HooksNow(), path);
 	bool direct = IsAccepted(src) && !src.transformed && OpensDirectly(path);
 	if(direct && !HasExtension(path, ".aac")){
 		AudioFileID file = NULL;
@@ -337,7 +385,7 @@ ProbeUserTrackMs(const char *path, bool *definitive)
 		AudioFilePacketTableInfo table;
 		UInt64 packets = 0;
 		UInt32 size = sizeof(format);
-		XorReader x = { NULL, 0 };
+		TransformReader x = { NULL, 0, NULL, NULL };
 		bool opened = OpenAudioFile(path, src, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
 		bool ok = opened && format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2 && format.mSampleRate > 0.0 && format.mFormatID != 'paac' &&
 			format.mFormatID != 'drms';
@@ -356,7 +404,7 @@ ProbeUserTrackMs(const char *path, bool *definitive)
 			return Verdict(definitive, opened, ok ? LengthMs(frames, (uint32_t)format.mSampleRate) : 0);
 	}
 	if(direct){
-		Decoder *d = OpenApple(path, true);
+		Decoder *d = OpenApple(path, true, src);
 		float first[64 * 2];
 		uint32_t ms = d && d->read(first, 64) > 0 ? LengthMs(d->lengthFrames(), d->rate()) : 0;
 		bool opened = d != NULL;
@@ -365,7 +413,7 @@ ProbeUserTrackMs(const char *path, bool *definitive)
 	}
 	if(!IsAccepted(src))
 		return Verdict(definitive, true, 0);
-	XorReader x = { NULL, 0 };
+	TransformReader x = { NULL, 0, NULL, NULL };
 	AudioFileID file = NULL;
 	Float64 seconds = 0.0;
 	AudioStreamBasicDescription format;
