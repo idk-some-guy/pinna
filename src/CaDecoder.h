@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 namespace ca {
 
@@ -21,6 +22,50 @@ public:
 };
 
 typedef Decoder *(*DecoderFactory)(const char *path);
+
+struct DecodeFormat
+{
+	bool accepted;
+	bool transformed;
+	const char *decodeAs;
+};
+
+struct DecodeHooks
+{
+	DecodeFormat (*describe)(const char *path, void *ctx);
+	void (*transform)(void *bytes, size_t n, uint64_t offset, void *ctx);
+	void *ctx;
+};
+
+// Null restores the defaults: .wav and .mp3 accepted and plain. Install before the stream worker starts.
+void SetDecodeHooks(const DecodeHooks *hooks);
+
+inline bool
+HasExtension(const char *path, const char *ext)
+{
+	size_t n = strlen(path), e = strlen(ext);
+	return n >= e && strcasecmp(path + n - e, ext) == 0;
+}
+
+inline DecodeFormat
+DefaultDescribe(const char *path)
+{
+	DecodeFormat f = { HasExtension(path, ".wav") || HasExtension(path, ".mp3"), false, NULL };
+	return f;
+}
+
+inline DecodeFormat
+HooksDescribe(const DecodeHooks &h, const char *path)
+{
+	return h.describe ? h.describe(path, h.ctx) : DefaultDescribe(path);
+}
+
+inline void
+HooksTransform(const DecodeHooks &h, void *bytes, size_t n, uint64_t offset)
+{
+	if(h.transform)
+		h.transform(bytes, n, offset, h.ctx);
+}
 
 inline uint32_t
 LengthMs(uint64_t frames, uint32_t rate)

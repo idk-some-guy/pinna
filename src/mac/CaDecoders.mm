@@ -5,6 +5,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <atomic>
 #include <vector>
 #include "CaShell.h"
 #ifdef CA_SHELL_OFFLINE
@@ -19,6 +20,26 @@ struct XorReader
 	SInt64 size;
 };
 
+static DecodeHooks gHooks = { NULL, NULL, NULL };
+
+static void
+LogOnce(std::atomic<bool> &logged, const char *line)
+{
+	if(!logged.exchange(true))
+		printf("sampman_ca: %s\n", line);
+}
+
+void
+SetDecodeHooks(const DecodeHooks *hooks)
+{
+	static std::atomic<bool> logged(false);
+	if(hooks && !hooks->describe){
+		LogOnce(logged, "decode hooks have no describe, the defaults stay");
+		hooks = NULL;
+	}
+	gHooks = hooks ? *hooks : DecodeHooks{ NULL, NULL, NULL };
+}
+
 static OSStatus
 ReadXor(void *ref, SInt64 position, UInt32 request, void *buffer, UInt32 *actual)
 {
@@ -28,9 +49,7 @@ ReadXor(void *ref, SInt64 position, UInt32 request, void *buffer, UInt32 *actual
 		return kAudioFilePositionError;
 	}
 	size_t n = fread(buffer, 1, request, x->file);
-	uint8_t *b = (uint8_t *)buffer;
-	for(size_t i = 0; i < n; i++)
-		b[i] ^= 0x22;
+	HooksTransform(gHooks, buffer, n, (uint64_t)position);
 	*actual = (UInt32)n;
 	return noErr;
 }
@@ -42,23 +61,50 @@ SizeXor(void *ref)
 }
 
 static bool
-HasExtension(const char *path, const char *ext)
-{
-	size_t n = strlen(path), e = strlen(ext);
-	return n >= e && strcasecmp(path + n - e, ext) == 0;
-}
-
-static bool
-IsGameFormat(const char *path)
-{
-	return HasExtension(path, ".wav") || HasExtension(path, ".mp3") || HasExtension(path, ".adf");
-}
-
-static bool
 IsUserFormat(const char *path)
 {
 	return HasExtension(path, ".m4a") || HasExtension(path, ".aac") || HasExtension(path, ".flac") || HasExtension(path, ".aif") ||
 		HasExtension(path, ".aiff");
+}
+
+static AudioFileTypeID
+ContentType(const char *ext)
+{
+	if(strcasecmp(ext, "mp3") == 0)
+		return kAudioFileMP3Type;
+	if(strcasecmp(ext, "wav") == 0)
+		return kAudioFileWAVEType;
+	return 0;
+}
+
+struct Source
+{
+	bool accepted, valid, transformed;
+	const char *ext;
+};
+
+static Source
+Describe(const char *path)
+{
+	static std::atomic<bool> noTransform(false), unknownType(false);
+	DecodeFormat f = HooksDescribe(gHooks, path);
+	const char *dot = strrchr(path, '.');
+	Source s = { f.accepted, true, f.accepted && f.transformed, f.decodeAs ? f.decodeAs : dot ? dot + 1 : "" };
+	if(s.transformed && !gHooks.transform){
+		LogOnce(noTransform, "a format is described as transformed but the hooks have no transform, its files are refused");
+		s.valid = false;
+	}
+	else if(s.transformed && ContentType(s.ext) == 0){
+		LogOnce(unknownType, "a format is described as decoded as a type the engine does not know, its files are refused");
+		s.valid = false;
+	}
+	return s;
+}
+
+static bool
+IsAccepted(const Source &s)
+{
+	return s.accepted && s.valid;
 }
 
 static void
@@ -76,15 +122,15 @@ FloatClient(AudioStreamBasicDescription *client, Float64 rate, UInt32 channels)
 }
 
 static bool
-OpenAudioFile(const char *path, XorReader *x, AudioFileID *file)
+OpenAudioFile(const char *path, const Source &src, XorReader *x, AudioFileID *file)
 {
-	if(HasExtension(path, ".adf")){
+	if(src.transformed){
 		x->file = fopen(path, "rb");
 		if(x->file == NULL)
 			return false;
 		if(fseeko(x->file, 0, SEEK_END) != 0 || (x->size = ftello(x->file)) < 0)
 			return false;
-		return AudioFileOpenWithCallbacks(x, ReadXor, NULL, SizeXor, NULL, kAudioFileMP3Type, file) == noErr;
+		return AudioFileOpenWithCallbacks(x, ReadXor, NULL, SizeXor, NULL, ContentType(src.ext), file) == noErr;
 	}
 	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
 	if(url == NULL)
@@ -129,7 +175,8 @@ public:
 	}
 	bool open(const char *path, bool corrections)
 	{
-		if(!OpenAudioFile(path, &mXor, &mFile) || ExtAudioFileWrapAudioFileID(mFile, false, &mExt) != noErr)
+		Source src = Describe(path);
+		if(!src.valid || !OpenAudioFile(path, src, &mXor, &mFile) || ExtAudioFileWrapAudioFileID(mFile, false, &mExt) != noErr)
 			return false;
 		AudioStreamBasicDescription file;
 		UInt32 size = sizeof(file);
@@ -148,9 +195,9 @@ public:
 		if(ExtAudioFileGetProperty(mExt, kExtAudioFileProperty_FileLengthFrames, &size, &frames) != noErr || frames <= 0)
 			return false;
 		mLength = (uint64_t)frames;
-		if(corrections && (HasExtension(path, ".mp3") || HasExtension(path, ".adf")))
+		if(corrections && strcasecmp(src.ext, "mp3") == 0)
 			correctMpeg(path);
-		if(corrections && HasExtension(path, ".wav") && file.mFramesPerPacket > 0)
+		if(corrections && strcasecmp(src.ext, "wav") == 0 && file.mFramesPerPacket > 0)
 			mQuantum = file.mFramesPerPacket;
 		return mLength > 0 && seekFrame(0, true);
 	}
@@ -241,7 +288,7 @@ OpenApple(const char *path, bool corrections)
 Decoder *
 OpenDecoder(const char *path)
 {
-	if(IsGameFormat(path) || IsUserFormat(path))
+	if(IsAccepted(Describe(path)))
 		return OpenApple(path, true);
 	return NULL;
 }
@@ -282,14 +329,16 @@ Verdict(bool *definitive, bool fromFile, uint32_t ms)
 uint32_t
 ProbeUserTrackMs(const char *path, bool *definitive)
 {
-	if(IsUserFormat(path) && !HasExtension(path, ".aac")){
+	Source src = Describe(path);
+	bool direct = IsAccepted(src) && !src.transformed && IsUserFormat(path);
+	if(direct && !HasExtension(path, ".aac")){
 		AudioFileID file = NULL;
 		AudioStreamBasicDescription format;
 		AudioFilePacketTableInfo table;
 		UInt64 packets = 0;
 		UInt32 size = sizeof(format);
 		XorReader x = { NULL, 0 };
-		bool opened = OpenAudioFile(path, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
+		bool opened = OpenAudioFile(path, src, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
 		bool ok = opened && format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2 && format.mSampleRate > 0.0 && format.mFormatID != 'paac' &&
 			format.mFormatID != 'drms';
 		uint64_t frames = 0;
@@ -306,7 +355,7 @@ ProbeUserTrackMs(const char *path, bool *definitive)
 		if(!ok || frames > 0)
 			return Verdict(definitive, opened, ok ? LengthMs(frames, (uint32_t)format.mSampleRate) : 0);
 	}
-	if(IsUserFormat(path)){
+	if(direct){
 		Decoder *d = OpenApple(path, true);
 		float first[64 * 2];
 		uint32_t ms = d && d->read(first, 64) > 0 ? LengthMs(d->lengthFrames(), d->rate()) : 0;
@@ -314,14 +363,14 @@ ProbeUserTrackMs(const char *path, bool *definitive)
 		delete d;
 		return Verdict(definitive, opened, ms);
 	}
-	if(!IsGameFormat(path))
+	if(!IsAccepted(src))
 		return Verdict(definitive, true, 0);
 	XorReader x = { NULL, 0 };
 	AudioFileID file = NULL;
 	Float64 seconds = 0.0;
 	AudioStreamBasicDescription format;
 	UInt32 size = sizeof(format);
-	bool opened = OpenAudioFile(path, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
+	bool opened = OpenAudioFile(path, src, &x, &file) && AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr;
 	bool ok = opened && format.mChannelsPerFrame >= 1 && format.mChannelsPerFrame <= 2;
 	size = sizeof(seconds);
 	bool timed = ok && AudioFileGetProperty(file, kAudioFilePropertyEstimatedDuration, &size, &seconds) == noErr;
