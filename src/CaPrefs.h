@@ -24,8 +24,6 @@ struct AudioEnginePrefs
 	float reverbAmount;
 };
 
-extern AudioEnginePrefs gAudioEnginePrefs;
-
 static const int32_t kModeUnknown = -1;
 static const int32_t kAlgorithmUnknown = -1;
 static const int32_t kDefaultMode = MODE_SPATIAL;
@@ -49,7 +47,6 @@ static const char *const kModeNames[NUM_MODES] = { "classic", "spatial", "reimag
 static const char *const kAlgorithmNames[2] = { "auto", "hrtfhq" };
 static_assert(kSpatialUseOutputType == 0 && kSpatialHRTFHQ == 1, "algorithm names");
 static const char *const kOutputNames[NUM_OUTPUTS] = { "auto", "headphones", "builtin", "external", "multichannel" };
-static const char *const kOutputMenuLabels[NUM_OUTPUTS] = { "AUTO", "HEADPHONES", "BUILT-IN SPEAKERS", "EXTERNAL SPEAKERS", "MULTICHANNEL" };
 
 inline void
 PrefsDefaults(AudioEnginePrefs &p)
@@ -135,20 +132,6 @@ ResolveMode(int32_t requested, bool *fellBack)
 	return requested == MODE_SPATIAL || requested == MODE_REIMAGINED ? MODE_SPATIAL : MODE_CLASSIC;
 }
 
-inline const char *
-OutputTypeMenuLabel(int32_t pref, int32_t detected, char *out, size_t size)
-{
-	if(pref == OUTPUT_MULTICHANNEL && detected > OUTPUT_AUTO && detected < NUM_OUTPUTS && detected != OUTPUT_MULTICHANNEL)
-		snprintf(out, size, "%s (%s)", kOutputMenuLabels[pref], kOutputMenuLabels[detected]);
-	else if(pref > OUTPUT_AUTO && pref < NUM_OUTPUTS)
-		snprintf(out, size, "%s", kOutputMenuLabels[pref]);
-	else if(detected > OUTPUT_AUTO && detected < NUM_OUTPUTS)
-		snprintf(out, size, "%s (%s)", kOutputMenuLabels[OUTPUT_AUTO], kOutputMenuLabels[detected]);
-	else
-		snprintf(out, size, "%s", kOutputMenuLabels[OUTPUT_AUTO]);
-	return out;
-}
-
 inline int32_t
 NextOutputType(int32_t type, int32_t step)
 {
@@ -157,32 +140,11 @@ NextOutputType(int32_t type, int32_t step)
 	return ((type + step) % NUM_OUTPUTS + NUM_OUTPUTS) % NUM_OUTPUTS;
 }
 
-inline bool
-AudioModeOnSpeakers(int32_t outputType)
-{
-	return outputType == OUTPUT_EXTERNAL;
-}
-
-inline const char *
-AudioModeMenuLabel(int32_t stored, bool unitUnavailable, bool speakers = false)
-{
-	bool fellBack;
-	if(ResolveMode(stored, &fellBack) == MODE_CLASSIC)
-		return "CLASSIC";
-	return speakers ? "SPATIAL (SPEAKERS)" : unitUnavailable ? "SPATIAL (UNAVAILABLE)" : "SPATIAL";
-}
-
 inline int32_t
 ToggledMode(int32_t stored)
 {
 	bool fellBack;
 	return ResolveMode(stored, &fellBack) == MODE_SPATIAL ? MODE_CLASSIC : MODE_SPATIAL;
-}
-
-inline const char *
-KeylessMenuLabel(const char *key)
-{
-	return strcmp(key, "FEA_AMD") == 0 ? "AUDIO MODE" : NULL;
 }
 
 inline bool
@@ -371,50 +333,6 @@ ProviderIndexRemap(const ProviderList &from, const ProviderList &to, int32_t ind
 			if(strcmp(to.uid[i], from.uid[index]) == 0)
 				return i;
 	return ProviderIndexForUid(to, currentUid);
-}
-
-template<class Ch, class Measure>
-inline void
-FitMenuText(Ch *s, Measure width, float maxWidth)
-{
-	if(width(s) <= maxWidth)
-		return;
-	enum { kMax = 255, kSuffix = 15 };
-	Ch orig[kMax + 1], suffix[kSuffix + 1];
-	size_t n = 0;
-	for(; s[n] != 0 && n < kMax; n++)
-		orig[n] = s[n];
-	orig[n] = 0;
-	size_t keep = n, j = n;
-	while(j > 0 && orig[j - 1] >= '0' && orig[j - 1] <= '9')
-		j--;
-	if(j < n && j > 1 && orig[j - 1] == ' ' && n - (j - 1) <= kSuffix)
-		keep = j - 1;
-	size_t sn = 0;
-	for(size_t i = keep; i < n; i++)
-		suffix[sn++] = orig[i];
-	if(keep < n)
-		for(size_t cut = keep; cut-- > 0;){
-			size_t end = cut;
-			while(end > 0 && orig[end - 1] == ' ')
-				end--;
-			if(end == 0)
-				break;
-			for(size_t i = 0; i < end; i++)
-				s[i] = orig[i];
-			for(size_t i = 0; i < sn; i++)
-				s[end + i] = suffix[i];
-			s[end + sn] = 0;
-			if(width(s) <= maxWidth)
-				return;
-		}
-	for(size_t i = 0; i <= n; i++)
-		s[i] = orig[i];
-	for(size_t len = n; len > 0 && width(s) > maxWidth;){
-		s[--len] = 0;
-		while(len > 0 && s[len - 1] == ' ')
-			s[--len] = 0;
-	}
 }
 
 }
