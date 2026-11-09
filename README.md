@@ -1,9 +1,9 @@
 # pinna
 
-An audio engine library for games. It mixes voices and streams, places sounds
-around the listener, adds reverb that follows the place the listener is in and
-echoes off nearby walls, and sends the result to an output backend. Core Audio
-is the first backend.
+An audio engine library meant for older games of the GTA III era. It mixes
+voices and streams, places sounds around the listener, adds reverb that follows
+the place the listener is in and echoes off nearby walls, and sends the result
+to an output backend. Core Audio is the first backend.
 
 The pinna is the outer ear. Its shape is what lets you hear where a sound
 comes from.
