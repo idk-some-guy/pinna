@@ -25,8 +25,7 @@
 
 namespace ca {
 
-enum { kMaxDevices = 32, kSpatial3DInputs = 53, kBypassInput = 52, kSpatialPullFailLimit = 8, kMaxOutChannels = 8 };
-static_assert(kChannels + kEchoTaps == kBypassInput, "echo inputs");
+enum { kMaxDevices = 32, kBypassInput = kChannels + kEchoTaps, kSpatial3DInputs = kBypassInput + 1, kSpatialPullFailLimit = 8, kMaxOutChannels = 8 };
 static_assert(kMaxOutChannels == kMaxLayoutChannels, "output channel limit");
 static_assert(kLayoutStereo == kAudioChannelLayoutTag_Stereo && kLayoutMono == kAudioChannelLayoutTag_Mono && kLayoutQuadraphonic == kAudioChannelLayoutTag_Quadraphonic &&
 	kLayoutMpeg50A == kAudioChannelLayoutTag_MPEG_5_0_A && kLayoutMpeg51A == kAudioChannelLayoutTag_MPEG_5_1_A && kLayoutMpeg51D == kAudioChannelLayoutTag_MPEG_5_1_D &&
@@ -266,7 +265,7 @@ SetHeadTrackingProperty(bool on)
 	UInt32 tracking = on ? 1 : 0;
 	OSStatus err = AudioUnitSetProperty(sSpatial3D, kAudioUnitProperty_SpatialMixerEnableHeadTracking, kAudioUnitScope_Global, 0, &tracking, sizeof(tracking));
 	if(err != noErr)
-		printf("sampman_ca: head tracking %s failed (%d)\n", on ? "on" : "off", (int)err);
+		printf("%s head tracking %s failed (%d)\n", LogPrefix(), on ? "on" : "off", (int)err);
 }
 
 static bool
@@ -411,7 +410,7 @@ SetupEnvBank(double rate)
 	sEnvHold = 0;
 	if(!ok){
 		DisposeEnvBank();
-		printf("sampman_ca: reverb units unavailable, spatial mode has no reverb\n");
+		printf("%s reverb units unavailable, spatial mode has no reverb\n", LogPrefix());
 	}
 	sEnvHeld.store(ok ? place : -1, std::memory_order_relaxed);
 	sEnvOk.store(ok, std::memory_order_relaxed);
@@ -423,7 +422,7 @@ SetupReverb(double rate)
 	DisposeUnit(&sReverb);
 	sReverb = MakeUnit(kAudioUnitType_Effect, kAudioUnitSubType_Reverb2);
 	if(sReverb == NULL){
-		printf("sampman_ca: reverb unavailable\n");
+		printf("%s reverb unavailable\n", LogPrefix());
 		return;
 	}
 	bool ok = InitReverb(sReverb, rate, sSendFeed);
@@ -431,7 +430,7 @@ SetupReverb(double rate)
 		ok = AudioUnitSetParameter(sReverb, kCaveOnReverb2[i].id, kAudioUnitScope_Global, 0, kCaveOnReverb2[i].value, 0) == noErr;
 	if(!ok){
 		DisposeUnit(&sReverb);
-		printf("sampman_ca: reverb unavailable\n");
+		printf("%s reverb unavailable\n", LogPrefix());
 	}
 }
 
@@ -817,7 +816,7 @@ LayoutTagOf(AudioChannelLayout *layout, UInt32 size, const char *name = NULL)
 		for(UInt32 i = 0; i < layout->mNumberChannelDescriptions; i++)
 			used += layout->mChannelDescriptions[i].mChannelLabel != kAudioChannelLabel_Unused;
 	if(used > 4 && name && FirstLayoutLog(name))
-		printf("sampman_ca: speaker layout of %u channels on \"%s\" has no standard tag, the channel count picks the order\n", (unsigned)used, name);
+		printf("%s speaker layout of %u channels on \"%s\" has no standard tag, the channel count picks the order\n", LogPrefix(), (unsigned)used, name);
 	return used > 0 && used <= 4 ? kAudioChannelLayoutTag_Stereo : 0;
 }
 
@@ -1127,7 +1126,7 @@ SetupSpatialOrBypass(double rate)
 		sSpatialBypass = bypass;
 	}
 	if(bypass)
-		printf("sampman_ca: spatial mixer unavailable, classic stereo bypasses it\n");
+		printf("%s spatial mixer unavailable, classic stereo bypasses it\n", LogPrefix());
 	DisposeUnit(&sSpatial3D);
 	int32_t type = sOutputType.load(std::memory_order_relaxed);
 	bool unavailable = OutputRoutesSpatial(type) && !SetupSpatial3D(rate, sSpatialAlgorithm, type);
@@ -1142,7 +1141,7 @@ SetupSpatialOrBypass(double rate)
 		sSpatial3DUnavailable = unavailable;
 	}
 	if(unavailable)
-		printf("sampman_ca: spatial mixer for positioned voices unavailable, spatial mode uses classic routing\n");
+		printf("%s spatial mixer for positioned voices unavailable, spatial mode uses classic routing\n", LogPrefix());
 	SetupReverb(rate);
 	SetupEnvBank(rate);
 	return true;
@@ -1263,7 +1262,7 @@ LogDevice(AudioObjectID dev, const char *name)
 			strlcat(terminals, " ", sizeof(terminals));
 		strlcat(terminals, code, sizeof(terminals));
 	}
-	printf("sampman_ca: device \"%s\" transport %s, terminals %s, data source %s, channels %u, output %s\n", name, transport, terminals, source,
+	printf("%s device \"%s\" transport %s, terminals %s, data source %s, channels %u, output %s\n", LogPrefix(), name, transport, terminals, source,
 		CurrentChannels(dev), OutputTypeName(sOutputType.load(std::memory_order_relaxed)));
 }
 
@@ -1298,7 +1297,7 @@ ApplyOutputType(const DeviceEntry &e)
 	if(tag != 0 && !MixerAcceptsLayout(tag))
 		tag = 0;
 	if(sOutputPref == OUTPUT_MULTICHANNEL && tag == 0){
-		printf("sampman_ca: multichannel not used, %u channels, layout tag %u, %s\n", e.outputChannels, e.layoutTag,
+		printf("%s multichannel not used, %u channels, layout tag %u, %s\n", LogPrefix(), e.outputChannels, e.layoutTag,
 			e.outputChannels > 2 ? "no layout the spatial mixer supports" : "the device has two channels or fewer");
 		type = DetectOutputType(e);
 	}
@@ -1365,7 +1364,7 @@ OpenOutput(AudioObjectID dev)
 		layout.mChannelLayoutTag = sLayoutTag;
 		OSStatus st = ok ? AudioUnitSetProperty(sOutput, kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Input, 0, &layout, sizeof(layout)) : noErr;
 		if(st != noErr)
-			printf("sampman_ca: output unit refused the channel layout (%d), channels follow the device order\n", (int)st);
+			printf("%s output unit refused the channel layout (%d), channels follow the device order\n", LogPrefix(), (int)st);
 	}
 	ok = ok && AudioUnitSetProperty(sOutput, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof(maxFrames)) == noErr;
 	ok = ok && AudioUnitSetProperty(sOutput, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof(cb)) == noErr;
@@ -1430,7 +1429,7 @@ Rebuild(int event, uint32_t eventId, const char *why)
 	if(!ok && c.id != kAudioObjectUnknown){
 		char name[128];
 		ReadDeviceName(c.id, name, sizeof(name));
-		printf("sampman_ca: output failed on \"%s\"%s\n", name, c.id != sDefaultId ? ", using the default" : "");
+		printf("%s output failed on \"%s\"%s\n", LogPrefix(), name, c.id != sDefaultId ? ", using the default" : "");
 		if(c.id != sDefaultId && sDefaultId != kAudioObjectUnknown){
 			ok = OpenOutput(sDefaultId);
 			c.fellBack = true;
@@ -1450,20 +1449,20 @@ Rebuild(int event, uint32_t eventId, const char *why)
 			sRebuilds++;
 	}
 	if(!ok)
-		printf("sampman_ca: no output device (%s), a silent clock drives the engine at %.0f Hz\n", why, sRate);
+		printf("%s no output device (%s), a silent clock drives the engine at %.0f Hz\n", LogPrefix(), why, sRate);
 	else if(event == EVENT_START)
-		printf("sampman_ca: output \"%s\" %.0f Hz, buffer %u%s%s\n", sDeviceName, sRate, sBuffer, sSpatialBypass ? ", spatial mixer bypassed" : "",
+		printf("%s output \"%s\" %.0f Hz, buffer %u%s%s\n", LogPrefix(), sDeviceName, sRate, sBuffer, sSpatialBypass ? ", spatial mixer bypassed" : "",
 			c.fellBack ? ", pinned device missing, using the default" : "");
 	else
-		printf("sampman_ca: output rebuilt (%s): \"%s\" %.0f Hz, buffer %u%s\n", why, sDeviceName, sRate, sBuffer,
+		printf("%s output rebuilt (%s): \"%s\" %.0f Hz, buffer %u%s\n", LogPrefix(), why, sDeviceName, sRate, sBuffer,
 			c.fellBack ? ", pinned device missing, using the default" : "");
 }
 
 static void
-EnsureControl(void)
+EnsureControl(const char *label = NULL)
 {
-	if(sControl == nil)
-		sControl = dispatch_queue_create("reVC.audio.control", DISPATCH_QUEUE_SERIAL);
+	if(sControl == nil || (label && strcmp(dispatch_queue_get_label(sControl), label) != 0))
+		sControl = dispatch_queue_create(label ? label : kDefaultQueueLabel, DISPATCH_QUEUE_SERIAL);
 }
 
 static void
@@ -1516,8 +1515,9 @@ UnwatchSystem(void)
 }
 
 bool
-ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t algorithm)
+ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t algorithm, const ShellConfig *config)
 {
+	SetLogPrefix(config ? config->logPrefix : NULL);
 #ifdef CA_SHELL_OFFLINE
 	if(gShellOffline){
 		sOutputPref = outputPref;
@@ -1525,7 +1525,7 @@ ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t al
 		return ShellStartOffline(shared, 48000.0);
 	}
 	if(!sFake){
-		printf("sampman_ca: the offline tools never open a real device\n");
+		printf("%s the offline tools never open a real device\n", LogPrefix());
 		return false;
 	}
 #endif
@@ -1546,7 +1546,7 @@ ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref, int32_t al
 #else
 	sClock.Start(&sDrive, ClockRender, NULL, kFallbackRate, 512);
 #endif
-	EnsureControl();
+	EnsureControl(QueueLabelOf(config));
 	const char *pin = deviceUid && deviceUid[0] ? deviceUid : "default";
 	dispatch_sync(sControl, ^{
 		sStopping = false;
@@ -1594,7 +1594,7 @@ void
 ShellService(void)
 {
 	if(sEnvLogPulls.exchange(false, std::memory_order_relaxed))
-		printf("sampman_ca: reverb units stopped after repeated failed renders, spatial mode has no reverb until the output is rebuilt\n");
+		printf("%s reverb units stopped after repeated failed renders, spatial mode has no reverb until the output is rebuilt\n", LogPrefix());
 }
 
 void
@@ -2026,6 +2026,12 @@ ShellFadeAtStopForTest(uint32_t *quiet, uint32_t *tail)
 {
 	*quiet = sStopQuiet;
 	*tail = sStopTail;
+}
+
+void
+ShellQueueLabelForTest(char *out, size_t size)
+{
+	strlcpy(out, sControl ? dispatch_queue_get_label(sControl) : "", size);
 }
 
 void

@@ -19,7 +19,8 @@ struct PlaceInput
 {
 	float north, south, west, east;
 	float ceil[4];
-	bool interior, room;
+	bool enclosed, roomed;
+	float lowCeiling;
 };
 
 struct EnvPreset
@@ -40,7 +41,6 @@ static const float kEnvRayMax = 100.0f;
 static const float kEnvCeilCovered = 20.0f;
 static const float kEnvWallClose = 15.0f;
 static const float kEnvTunnelOpen = 30.0f;
-static const float kEnvGarageHeight = 6.0f;
 static const float kEnvNarrow = 12.0f;
 static const int kEnvConfirm = 2;
 static const uint32_t kEnvFadePending = 0xFFFFFFFFu;
@@ -68,7 +68,7 @@ EnvRay(float d)
 inline int
 ClassifyPlace(const PlaceInput &p)
 {
-	if(p.interior)
+	if(p.enclosed)
 		return ENV_INTERIOR;
 	float n = EnvRay(p.north), s = EnvRay(p.south), w = EnvRay(p.west), e = EnvRay(p.east);
 	int covered = 0;
@@ -86,7 +86,7 @@ ClassifyPlace(const PlaceInput &p)
 		bool ewClose = w < kEnvWallClose && e < kEnvWallClose;
 		if((nsClose && !ewClose && ew > kEnvTunnelOpen) || (ewClose && !nsClose && ns > kEnvTunnelOpen))
 			return ENV_TUNNEL;
-		if(sum / (float)covered < kEnvGarageHeight || p.room)
+		if(sum / (float)covered < p.lowCeiling || p.roomed)
 			return ENV_GARAGE;
 		return ENV_INTERIOR;
 	}

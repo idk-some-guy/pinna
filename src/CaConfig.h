@@ -2,14 +2,28 @@
 
 #include <stdint.h>
 
+#ifdef PINNA_CONFIG_HEADER
+#include PINNA_CONFIG_HEADER
+#endif
+
+#ifndef PINNA_CHANNELS
+#define PINNA_CHANNELS 44
+#endif
+#ifndef PINNA_STREAMS
+#define PINNA_STREAMS 3
+#endif
+#ifndef PINNA_POOL_SLOTS
+#define PINNA_POOL_SLOTS 96
+#endif
+
 namespace ca {
 
 enum
 {
-	kChannels = 44,
-	kStreams = 3,
+	kChannels = PINNA_CHANNELS,
+	kStreams = PINNA_STREAMS,
 	kMaxBlock = 4096,
-	kPoolSlots = 96,
+	kPoolSlots = PINNA_POOL_SLOTS,
 	kOalFadeFrames = 64,
 	kOalResamplerEdge = 24,
 	kOalMaxPitch = 10,

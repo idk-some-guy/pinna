@@ -26,7 +26,7 @@ static void
 LogOnce(std::atomic<bool> &logged, const char *line)
 {
 	if(!logged.exchange(true))
-		printf("sampman_ca: %s\n", line);
+		printf("%s %s\n", LogPrefix(), line);
 }
 
 void
@@ -61,7 +61,7 @@ SizeXor(void *ref)
 }
 
 static bool
-IsUserFormat(const char *path)
+OpensDirectly(const char *path)
 {
 	return HasExtension(path, ".m4a") || HasExtension(path, ".aac") || HasExtension(path, ".flac") || HasExtension(path, ".aif") ||
 		HasExtension(path, ".aiff");
@@ -330,7 +330,7 @@ uint32_t
 ProbeUserTrackMs(const char *path, bool *definitive)
 {
 	Source src = Describe(path);
-	bool direct = IsAccepted(src) && !src.transformed && IsUserFormat(path);
+	bool direct = IsAccepted(src) && !src.transformed && OpensDirectly(path);
 	if(direct && !HasExtension(path, ".aac")){
 		AudioFileID file = NULL;
 		AudioStreamBasicDescription format;

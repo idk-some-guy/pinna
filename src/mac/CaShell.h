@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "CaDecoder.h"
+#include "CaLog.h"
 #include "CaMixer.h"
 #include "CaTrackCache.h"
 
@@ -29,7 +30,7 @@ struct ShellInfo
 	char device[128];
 };
 
-bool ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref = OUTPUT_AUTO, int32_t algorithm = kSpatialUseOutputType);
+bool ShellStart(Shared *shared, const char *deviceUid, int32_t outputPref = OUTPUT_AUTO, int32_t algorithm = kSpatialUseOutputType, const ShellConfig *config = NULL);
 void ShellStop(void);
 void ShellService(void);
 ShellInfo ShellGetInfo(void);

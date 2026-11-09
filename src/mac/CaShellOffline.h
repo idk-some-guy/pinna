@@ -37,6 +37,7 @@ uint64_t ShellFramesForTest(void);
 uint32_t ShellConfigCallsForTest(void);
 uint32_t ShellDeviceCallsForTest(void);
 void ShellConfigDeviceForTest(char *out, size_t size);
+void ShellQueueLabelForTest(char *out, size_t size);
 void ShellFadeAtStopForTest(uint32_t *quiet, uint32_t *tail);
 void ShellFeedForTest(uint32_t chunkAt, uint32_t frames, uint32_t capacity, float *mono, float *stereoL, float *stereoR);
 uint64_t ShellClassicFramesForTest(void);

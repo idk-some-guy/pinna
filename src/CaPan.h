@@ -20,7 +20,7 @@ OalDistanceValid(float d)
 	return d >= 0.0f && isfinite(d);
 }
 
-// Raw SetChannel3DPosition args: OpenAL ignores the listener orientation for relative sources, so game +y pans as the up pole and -z as front.
+// Raw SetChannel3DPosition args: OpenAL ignores the listener orientation for relative sources, so +y pans as the up pole and -z as front.
 inline StereoGain
 OalPanGains(float gx, float gy, float gz)
 {
