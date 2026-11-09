@@ -120,7 +120,6 @@ static ClockTapFn sClockTap;
 static void *sClockTapCtx;
 static BlockTapFn sBlockTap;
 static void *sBlockTapCtx;
-typedef void (*EnvTapFn)(void *ctx, const float *envL, const float *envR, const float *caveL, const float *caveR, const float *envIn, uint32_t frames);
 static EnvTapFn sEnvTap;
 static float sTapL[kMaxBlock], sTapR[kMaxBlock], sTapIn[kMaxBlock];
 static void *sEnvTapCtx;

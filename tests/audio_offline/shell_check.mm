@@ -1623,16 +1623,6 @@ CheckRebuildClearsFailedPulls(void)
 	delete sh;
 }
 
-namespace pinna {
-typedef void (*EnvTapFn)(void *ctx, const float *envL, const float *envR, const float *caveL, const float *caveR, const float *envIn, uint32_t frames);
-void ShellEnvTapForTest(EnvTapFn tap, void *ctx);
-float ShellEnvDecayForTest(int unit);
-bool ShellEnvParamsForTest(int unit, float out[6]);
-void ShellEnvPoisonForTest(int unit);
-EnvState ShellEnvStateForTest(void);
-uint64_t ShellEnvPullsForTest(void);
-}
-
 struct UnitTap
 {
 	std::vector<float> envL, envR, caveL, caveR;

@@ -3,6 +3,7 @@
 #include "CaShell.h"
 #include "CaDevice.h"
 #include "CaClock.h"
+#include "CaEnvironment.h"
 
 #ifndef CA_SHELL_OFFLINE
 #error "CaShellOffline.h is for the offline tools only"
@@ -52,5 +53,15 @@ int ShellPendingRetriesForTest(void);
 Decoder *OpenAppleDecoderForTest(const char *path, bool corrections);
 uint32_t UserTrackProbesForTest(void);
 uint32_t ShellHrtfArmsForTest(void);
+typedef void (*EnvTapFn)(void *ctx, const float *envL, const float *envR, const float *caveL, const float *caveR, const float *envIn, uint32_t frames);
+void ShellEnvTapForTest(EnvTapFn tap, void *ctx);
+bool ShellEnvParamsForTest(int unit, float out[6]);
+void ShellEnvPoisonForTest(int unit);
+uint64_t ShellEnvPullsForTest(void);
+uint64_t ShellEnvPullNanosForTest(void);
+uint64_t ShellMixNanosForTest(void);
+uint64_t ShellEchoNanosForTest(void);
+EnvState ShellEnvStateForTest(void);
+float ShellEnvDecayForTest(int unit);
 
 }
