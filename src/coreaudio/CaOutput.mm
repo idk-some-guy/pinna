@@ -1,4 +1,4 @@
-#ifdef AUDIO_CA
+#ifdef PINNA_COREAUDIO
 #import <AppKit/AppKit.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreAudio/CoreAudio.h>

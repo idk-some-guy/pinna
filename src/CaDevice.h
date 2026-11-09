@@ -197,8 +197,8 @@ DeviceBatchEvent(bool gone, bool formatTouched, double rate, uint32_t channels, 
 inline bool
 DeviceChoiceChanges(const char *pinned, const char *chosen)
 {
-	if(pinna::FollowsDefault(pinned) || pinna::FollowsDefault(chosen))
-		return pinna::FollowsDefault(pinned) != pinna::FollowsDefault(chosen);
+	if(FollowsDefault(pinned) || FollowsDefault(chosen))
+		return FollowsDefault(pinned) != FollowsDefault(chosen);
 	return strcmp(pinned, chosen) != 0;
 }
 

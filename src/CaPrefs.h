@@ -113,7 +113,6 @@ OutputTypeFromName(const char *s, int32_t fallback)
 	return fallback;
 }
 
-
 inline int32_t
 ResolveMode(int32_t requested, bool *fellBack)
 {

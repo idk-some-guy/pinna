@@ -27,15 +27,19 @@ checki() {
 }
 checki reVC reVC
 checki re3 '(^|[^a-z])re3'
-check vice '(^|[^A-Za-z])([Vv]ice|VICE)([^a-z]|$)|Vice[A-Z]|vice::'
+check vice '(^|[^A-Za-z])([Vv]ice[a-z]*|VICE)([^a-z]|$)|Vice[A-Z]|vice::'
 checki gta '(^|[^a-z])gta'
 checki miami miami
 checki sampman sampman
 checki police police
 checki cutscene cutscene
-check ped '(^|[^A-Za-z])[Pp]ed([^a-z]|$)|Ped[A-Z]'
-check game '(^|[^A-Za-z])[Gg]ame([^a-z]|$)|Game[A-Z]'
+check ped '(^|[^A-Za-z])[Pp]eds?([^a-z]|$)|Ped[A-Z]'
+check game '(^|[^A-Za-z])[Gg]ame|Game[A-Z]'
 check FEA_ 'FEA_'
+check AUDIO_CA 'AUDIO_CA'
+check SetChannel3DPosition 'SetChannel3DPosition'
+checki user-track 'user[ -]track'
+checki studio-names 'rockstar|liberty|vercetti|tommy|librw|renderware'
 checki sfx-bank 'sfx\.(SDT|RAW)'
 checki sound-cache 'sound(_ca)?\.cache'
 check bank '(^|[^v])[Bb]ank'

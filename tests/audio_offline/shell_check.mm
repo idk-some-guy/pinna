@@ -1,4 +1,4 @@
-// mkdir -p build/tests && clang++ -std=gnu++14 -O2 -g -fsanitize=address -fobjc-arc -Wall -Wextra -mmacosx-version-min=14.0 -DAUDIO_CA -DCA_SHELL_OFFLINE -I src -I src/coreaudio -I tests/support tests/audio_offline/shell_check.mm src/coreaudio/CaOutput.mm src/CaMixer.cpp src/CaStream.cpp src/CaVoice.cpp src/CaResampler.cpp src/CaClock.cpp -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework AppKit -o build/tests/shell_check && build/tests/shell_check
+// mkdir -p build/tests && clang++ -std=gnu++14 -O2 -g -fsanitize=address -fobjc-arc -Wall -Wextra -mmacosx-version-min=14.0 -DPINNA_COREAUDIO -DCA_SHELL_OFFLINE -I src -I src/coreaudio -I tests/support tests/audio_offline/shell_check.mm src/coreaudio/CaOutput.mm src/CaMixer.cpp src/CaStream.cpp src/CaVoice.cpp src/CaResampler.cpp src/CaClock.cpp -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework AppKit -o build/tests/shell_check && build/tests/shell_check
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

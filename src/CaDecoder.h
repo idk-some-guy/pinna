@@ -37,7 +37,7 @@ struct DecodeHooks
 	void *ctx;
 };
 
-// Null restores the defaults: .wav and .mp3 accepted and plain. Refused with a logged line while a decoder is open.
+// Null restores the defaults: .wav and .mp3 accepted and plain. Refused with a logged line while a decoder is open or when describe is null; the installed hooks stay.
 bool SetDecodeHooks(const DecodeHooks *hooks);
 
 inline bool

@@ -1,4 +1,4 @@
-#ifdef AUDIO_CA
+#ifdef PINNA_COREAUDIO
 #import <AudioToolbox/AudioToolbox.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,8 +46,8 @@ SetDecodeHooks(const DecodeHooks *hooks)
 {
 	static std::atomic<bool> logged(false);
 	if(hooks && !hooks->describe){
-		LogOnce(logged, "decode hooks have no describe, the defaults stay");
-		hooks = NULL;
+		LogOnce(logged, "decode hooks have no describe, the installed hooks stay");
+		return false;
 	}
 	{
 		std::lock_guard<std::mutex> lock(gHooksLock);

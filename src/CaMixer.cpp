@@ -492,7 +492,6 @@ EnvBank::split(const float *send, uint32_t from, uint32_t to, const EnvSnap &e, 
 	}
 }
 
-
 static inline float
 EchoRead(const float *line, uint32_t length, uint32_t pos, uint32_t back, uint32_t written)
 {

@@ -158,7 +158,6 @@ TestMultichannelLayout(void)
 	CHECK(MultichannelLayoutTag(LayoutDevice(10, (0x80u << 16) | 10)) == kLayoutMpeg71C);
 }
 
-
 static DeviceEntry
 Typed(uint32_t transport, uint32_t terminal, uint32_t dataSource, uint32_t channels)
 {
