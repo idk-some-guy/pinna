@@ -5,7 +5,7 @@
 #include "CaResampler.h"
 #include "CaEcho.h"
 
-namespace ca {
+namespace pinna {
 
 struct VoiceSnap
 {

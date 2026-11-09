@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ca {
+namespace pinna {
 
 static const float kOalPanWarp = 1.5f;
 static const float kOalPanK0 = 0.500000f;

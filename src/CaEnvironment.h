@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <math.h>
 
-namespace ca {
+namespace pinna {
 
 enum
 {

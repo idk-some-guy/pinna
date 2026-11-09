@@ -4,7 +4,7 @@
 #include <string.h>
 #include "CaConfig.h"
 
-namespace ca {
+namespace pinna {
 
 struct DeviceEntry
 {
@@ -197,8 +197,8 @@ DeviceBatchEvent(bool gone, bool formatTouched, double rate, uint32_t channels, 
 inline bool
 DeviceChoiceChanges(const char *pinned, const char *chosen)
 {
-	if(ca::FollowsDefault(pinned) || ca::FollowsDefault(chosen))
-		return ca::FollowsDefault(pinned) != ca::FollowsDefault(chosen);
+	if(pinna::FollowsDefault(pinned) || pinna::FollowsDefault(chosen))
+		return pinna::FollowsDefault(pinned) != pinna::FollowsDefault(chosen);
 	return strcmp(pinned, chosen) != 0;
 }
 

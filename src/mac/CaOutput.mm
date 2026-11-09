@@ -23,7 +23,7 @@
 #include "CaClock.h"
 #include "OalPanTable.h"
 
-namespace ca {
+namespace pinna {
 
 enum { kMaxDevices = 32, kBypassInput = kChannels + kEchoTaps, kSpatial3DInputs = kBypassInput + 1, kSpatialPullFailLimit = 8, kMaxOutChannels = 8 };
 static_assert(kMaxOutChannels == kMaxLayoutChannels, "output channel limit");

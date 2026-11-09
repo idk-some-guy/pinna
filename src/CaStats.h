@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "CaLog.h"
 
-namespace ca {
+namespace pinna {
 
 struct StatsInfo
 {

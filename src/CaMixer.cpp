@@ -2,7 +2,7 @@
 #include <new>
 #include "CaMixer.h"
 
-namespace ca {
+namespace pinna {
 
 Shared::Shared(void) : latchedSerial(0), activeVoices(0), underruns(0), streamLatency(0), renders(0), envPlace(ENV_OPEN)
 {

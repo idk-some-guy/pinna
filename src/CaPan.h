@@ -6,7 +6,7 @@
 #include "CaRules.h"
 #include "OalPanTable.h"
 
-namespace ca {
+namespace pinna {
 
 inline bool
 OalFinitePosition(float gx, float gy, float gz)

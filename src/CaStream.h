@@ -10,7 +10,7 @@
 #include "CaDecoder.h"
 #include "CaResampler.h"
 
-namespace ca {
+namespace pinna {
 
 enum
 {

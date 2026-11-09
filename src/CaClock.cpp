@@ -5,7 +5,7 @@
 #include "CaConfig.h"
 #include "CaClock.h"
 
-namespace ca {
+namespace pinna {
 
 Clock::Clock(void) : mDrive(NULL), mRender(NULL), mCtx(NULL), mTime(NULL), mRate(kFallbackRate), mBlock(512), mRun(false), mStalls(0), mWakes(0) {}
 

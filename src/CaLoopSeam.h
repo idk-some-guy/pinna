@@ -4,7 +4,7 @@
 #include <math.h>
 #include <vector>
 
-namespace ca {
+namespace pinna {
 
 namespace seam {
 

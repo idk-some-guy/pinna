@@ -5,7 +5,7 @@
 #include <float.h>
 #include "CaConfig.h"
 
-namespace ca {
+namespace pinna {
 
 inline float
 OalInverseClampedGain(float dist, float ref, float maxDist)

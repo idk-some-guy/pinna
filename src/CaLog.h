@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <string.h>
 
-namespace ca {
+namespace pinna {
 
 struct ShellConfig
 {

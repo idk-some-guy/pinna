@@ -8,7 +8,7 @@
 #error "CaShellOffline.h is for the offline tools only"
 #endif
 
-namespace ca {
+namespace pinna {
 
 extern bool gShellOffline;
 

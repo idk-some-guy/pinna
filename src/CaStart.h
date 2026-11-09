@@ -4,7 +4,7 @@
 #include "CaMixer.h"
 #include "CaRules.h"
 
-namespace ca {
+namespace pinna {
 
 struct PoolStart
 {

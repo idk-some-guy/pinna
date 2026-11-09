@@ -16,7 +16,7 @@
 #define PINNA_POOL_SLOTS 96
 #endif
 
-namespace ca {
+namespace pinna {
 
 enum
 {

@@ -2,7 +2,7 @@
 #include <string.h>
 #include "CaVoice.h"
 
-namespace ca {
+namespace pinna {
 
 struct Loop
 {

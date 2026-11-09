@@ -5,7 +5,7 @@
 #include <string.h>
 #include <strings.h>
 
-namespace ca {
+namespace pinna {
 
 // One thread uses a decoder at a time.
 // A read shorter than asked means the stream has ended, at its end or on a decode or I/O error.

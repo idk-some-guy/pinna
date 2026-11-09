@@ -6,7 +6,7 @@
 #endif
 #include "CaStream.h"
 
-namespace ca {
+namespace pinna {
 
 static_assert((kWindowFrames & (kWindowFrames - 1)) == 0, "the window is indexed with a mask");
 static_assert(kWindowFrames >= kReaderSlice * kOalMaxPitch + 2 * kSincMaxTaps + kChunkFrames, "a slice at the highest step fits the window");

@@ -7,7 +7,7 @@
 #include "CaMixer.h"
 #include "CaTrackCache.h"
 
-namespace ca {
+namespace pinna {
 
 Decoder *OpenDecoder(const char *path);
 uint32_t ProbeLengthMs(const char *path);

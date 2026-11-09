@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include "CaResampler.h"
 
-namespace ca {
+namespace pinna {
 
 enum { kTableLen = (kSincHalf + 1) * kSincPhases + 2 };
 static_assert(kTableLen >= (kSincHalf + 1) * kSincPhases, "a stretched tap indexes below (kSincHalf + 1) * kSincPhases");

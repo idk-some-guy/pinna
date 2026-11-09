@@ -6,7 +6,7 @@
 #include "CaRules.h"
 #include "CaSpatial.h"
 
-namespace ca {
+namespace pinna {
 
 enum
 {

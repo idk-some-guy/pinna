@@ -7,7 +7,7 @@
 #include <string>
 #include "CaDecoder.h"
 
-namespace ca {
+namespace pinna {
 
 // Bump when the user-track probe rules or this cache's layout change; kLengthRulesVersion is checked as well.
 static const uint32_t kTrackCacheVersion = 1;

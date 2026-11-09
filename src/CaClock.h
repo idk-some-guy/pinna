@@ -5,7 +5,7 @@
 #include <thread>
 #include "CaDrive.h"
 
-namespace ca {
+namespace pinna {
 
 typedef void (*ClockRenderFn)(void *ctx, uint32_t frames, double rate);
 

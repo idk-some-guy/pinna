@@ -5,7 +5,7 @@
 #include "CaConfig.h"
 #include "CaRules.h"
 
-namespace ca {
+namespace pinna {
 
 static const uint32_t kModeDipFrames = 1024;
 

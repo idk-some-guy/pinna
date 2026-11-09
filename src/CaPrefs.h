@@ -10,7 +10,7 @@
 #include "CaDevice.h"
 #include "CaSpatial.h"
 
-namespace ca {
+namespace pinna {
 
 struct AudioEnginePrefs
 {

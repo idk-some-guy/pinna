@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <atomic>
 
-namespace ca {
+namespace pinna {
 
 template<typename T>
 class TripleBuffer

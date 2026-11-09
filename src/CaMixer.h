@@ -9,7 +9,7 @@
 #include "CaSpatial.h"
 #include "CaEnvironment.h"
 
-namespace ca {
+namespace pinna {
 
 struct EnvSnap
 {

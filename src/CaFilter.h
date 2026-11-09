@@ -3,7 +3,7 @@
 #include <math.h>
 #include <stdint.h>
 
-namespace ca {
+namespace pinna {
 
 struct Biquad
 {

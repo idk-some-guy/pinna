@@ -13,7 +13,7 @@
 #include "CaShellOffline.h"
 #endif
 
-namespace ca {
+namespace pinna {
 
 struct TransformReader
 {
