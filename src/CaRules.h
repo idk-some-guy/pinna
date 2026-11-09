@@ -36,14 +36,6 @@ ScaledVolume(uint32_t fade, uint32_t vol, uint32_t master)
 	return (fade * vol * master) >> 14;
 }
 
-inline uint32_t
-CutsceneVolume(uint32_t vol, bool cutscene, bool finale)
-{
-	if(!cutscene)
-		return vol;
-	return finale ? 0 : vol >> 2;
-}
-
 inline float
 GainFromVolume(uint32_t vol)
 {
@@ -156,33 +148,10 @@ struct StereoGain
 	float l, r;
 };
 
-inline StereoGain
-PoliceBakedPan(uint32_t pan)
-{
-	int lv = pan <= 63 ? 128 : (int)((127 - (int)pan) / 64.0f * 128);
-	int rv = pan >= 63 ? 128 : (int)((int)pan / 64.0f * 128);
-	StereoGain g = { lv / 128.0f, rv / 128.0f };
-	return g;
-}
-
-inline uint32_t
-StreamEffectVolume(uint8_t stream, uint32_t vol, uint32_t effects, uint32_t effectsFade)
-{
-	if(stream == 1 || stream == 2)
-		return (128 * vol * effects) >> 14;
-	return (effectsFade * vol * effects) >> 14;
-}
-
 inline uint32_t
 StreamMusicVolume(uint32_t vol, uint32_t music, uint32_t musicFade, float boost)
 {
 	return (musicFade * vol * (uint32_t)(music * boost + music)) >> 14;
-}
-
-inline float
-Mp3BoostMult(uint32_t boost, bool userTrack, bool interrupted)
-{
-	return userTrack && !interrupted ? boost / 64.f : 0.0f;
 }
 
 }

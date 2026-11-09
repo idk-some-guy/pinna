@@ -53,21 +53,6 @@ StartFromPool(const Snapshot &mirror, const Shared &shared, const uint32_t *slot
 	return true;
 }
 
-inline uint32_t
-BankSampleBytes(uint32_t offset, uint32_t size, uint32_t blockBytes)
-{
-	if(offset >= blockBytes)
-		return 0;
-	return size < blockBytes - offset ? size : blockBytes - offset;
-}
-
-inline uint32_t
-PedCommentBytes(uint32_t offset, uint32_t size, uint32_t blockBytes, uint32_t slotBytes)
-{
-	uint32_t n = BankSampleBytes(offset, size, blockBytes);
-	return n < slotBytes ? n : slotBytes;
-}
-
 inline void
 ArmVoice(VoiceSnap &v, const int16_t *data, uint32_t length, LoopRange r, bool loop, int8_t slot, uint32_t playId)
 {

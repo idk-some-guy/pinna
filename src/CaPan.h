@@ -52,13 +52,6 @@ OalSourceGains(float gx, float gy, float gz, float ref, float maxDist)
 	return g;
 }
 
-inline StereoGain
-PoliceSourceGains(StereoGain baked)
-{
-	StereoGain g = { baked.l * kOalStereoSource[0][0] + baked.r * kOalStereoSource[1][0], baked.l * kOalStereoSource[0][1] + baked.r * kOalStereoSource[1][1] };
-	return g;
-}
-
 inline const float *
 OalStreamPanGains(uint32_t pan)
 {
